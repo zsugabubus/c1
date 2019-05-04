@@ -105,8 +105,7 @@ int main(int argc, char **argv) {
 
 	enum { test_unit, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
-	int longest_name = 0;
-	int longest_unit = 0;
+	int width = 0;
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle;
 
@@ -135,20 +134,24 @@ int main(int argc, char **argv) {
 			if (!currtest->desc)
 				continue;
 
-			len = strlen(currtest->desc);
-			if (len > longest_name)
-				longest_name = len;
+			len = strlen(currtest->desc) + 17;
+			if (len > width)
+				width = len;
 
 		} else {
 			++stat[test_unit];
+
 			len = 5 + strlen(currtest->desc) + strlen(currtest->file) + 4;
-			if (len > longest_unit)
-				longest_unit = len;
+			if (len > width)
+				width = len;
 		}
 	}
 
-	fprintf(stdout, "found %u tests in %u units\n",
-		stat[test_total], stat[test_unit]);
+	if (width > 72)
+		width = 72;
+
+	fprintf(stdout, "running %u tests\n",
+		stat[test_total]);
 
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
 		unsigned long *total_ns;
@@ -160,13 +163,13 @@ int main(int argc, char **argv) {
 			fprintf(stdout, "\nunit " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
 				currtest->desc, currtest->file);
 
-			print_hline(longest_unit, '-');
+			print_hline(width, '-');
 			continue;
 		}
 
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
 			currtest->desc,
-			longest_name - (int)strlen(currtest->desc), "");
+			width - 17 - (int)strlen(currtest->desc), "");
 		fflush(stdout);
 
 		for (skip = 0, argi = 1;argi < argc;++argi) {
@@ -278,7 +281,7 @@ int main(int argc, char **argv) {
 	}
 
 	if ('A' == TEST_OUTPUT && stat[test_failed] > 0) {
-		print_hline(longest_unit, '=');
+		print_hline(width, '=');
 
 		for (currtest = &__start_test;++currtest < &__stop_test;) {
 			if (EXIT_SUCCESS != currtest->status) {
@@ -290,7 +293,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	print_hline(longest_unit, '=');
+	print_hline(width, '=');
 
 	fprintf(stdout,
 		ANSI_BOLD "test result" ANSI_RESET ": " ANSI_BOLD "%s" ANSI_RESET ". "
