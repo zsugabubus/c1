@@ -106,6 +106,7 @@ int main(int argc, char **argv) {
 	enum { test_unit, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
 	int width = 0;
+	unsigned long *shm_total_ns;
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle;
 
@@ -153,8 +154,16 @@ int main(int argc, char **argv) {
 	fprintf(stdout, "running %u tests\n",
 		stat[test_total]);
 
+	shm_total_ns = mmap(NULL, sizeof(*shm_total_ns),
+		PROT_READ | PROT_WRITE,
+		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+	if (MAP_FAILED == shm_total_ns) {
+		perror("mmap");
+		exit(EXIT_FAILURE);
+	}
+
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
-		unsigned long *total_ns;
 		char succ_info[50];
 		int argi;
 		int skip;
@@ -204,15 +213,6 @@ int main(int argc, char **argv) {
 			exit(EXIT_FAILURE);
 		}
 
-		total_ns = mmap(NULL, sizeof(*total_ns),
-			PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
-		if (MAP_FAILED == total_ns) {
-			perror("mmap");
-			exit(EXIT_FAILURE);
-		}
-
 		switch (fork()) {
 		case -1:
 			perror("fork");
@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
 			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
 			tsdiff(&ts_end, &ts_start, &ts_start);
-			*total_ns = tstons(&ts_start);
+			*shm_total_ns = tstons(&ts_start);
 
 			exit(EXIT_SUCCESS);
 			break;
@@ -245,7 +245,7 @@ int main(int argc, char **argv) {
 			/* Wait test to be finished. */ \
 			wait(&currtest->status);
 
-			currtest->total_ns = *total_ns;
+			currtest->total_ns = *shm_total_ns;
 
 			++stat[(EXIT_SUCCESS == currtest->status ? test_passed : test_failed)];
 
@@ -279,6 +279,8 @@ int main(int argc, char **argv) {
 		}
 
 	}
+
+	munmap(shm_total_ns, sizeof(*shm_total_ns));
 
 	if ('A' == TEST_OUTPUT && stat[test_failed] > 0) {
 		print_hline(width, '=');
