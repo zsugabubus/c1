@@ -37,11 +37,16 @@ struct test_test_info *currtest;
 
 static void cat(int fd) {
 	char buf[(1 << 12)];
-	ssize_t len;
+	ssize_t len = 0;
+	ssize_t plen;
 	off_t offset;
 
-	for (offset = 0;(len = pread(fd, buf, sizeof(buf), offset)) > 0;offset += sizeof(buf))
+	for (offset = 0;plen = len, (len = pread(fd, buf, sizeof(buf), offset)) > 0;offset += len)
 		write(STDERR_FILENO, buf, len);
+
+	if (0 == plen || buf[plen - 1] != '\n')
+		fputs("\x1b[7m$\x1b[0m\n", stderr);
+	fputc('\n', stderr);
 }
 
 static unsigned long nstohtime(unsigned long ns) {
