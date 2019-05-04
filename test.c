@@ -84,8 +84,8 @@ static void print_hline(int n, char ch) {
 	int i;
 
 	for (i = 0;i < n;++i)
-		putc(ch, stdout);
-	putc('\n', stdout);
+		fputc(ch, stdout);
+	fputc('\n', stdout);
 }
 
 #ifdef TEST_NOLIBSEGFAULT
