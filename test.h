@@ -54,6 +54,18 @@
 #define ANSI_MAGENTA ""
 #endif
 
+#ifndef TEST_NOFORK
+# define TEST_PARAM_ void
+# define TEST_FORK_IMPL_ fork()
+# define TEST_CASE_EXIT_IMPL exit(EXIT_SUCCESS)
+# define FAILURE(code) exit((code));
+#else
+# define TEST_PARAM_ int *const _test_result
+# define TEST_FORK_IMPL_ 0
+# define TEST_CASE_EXIT_IMPL ftruncate(currtest->outfd, test_case_info[--test_case_depth].outpos)
+# define FAILURE(code) do { *_test_result = (code); return; } while (0);
+#endif
+
 struct test_case_info {
 	char const *name;
 	char const *file;
@@ -62,7 +74,7 @@ struct test_case_info {
 };
 
 struct test_test_info {
-	void(*const run)(void)  __attribute__((aligned(16)));
+	void(*const run)(TEST_PARAM_)  __attribute__((aligned(16)));
 	char const *const desc;
 	char const *const file;
 	unsigned line;
@@ -91,10 +103,10 @@ extern struct test_test_info __start_test, __stop_test;
 #define TESTD(desc) \
 	BENCHD(desc, 1)
 
-#define BENCH_(static_void, name, desc, repeat) \
-	static_void name(void); \
+#define BENCH_(static_rtype, name, desc, repeat) \
+	static_rtype name(TEST_PARAM_); \
 	TEST_VAR(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
-	static_void name(void)
+	static_rtype name(TEST_PARAM_)
 
 #define CASE(name) \
 	CASED(#name)
@@ -106,7 +118,7 @@ extern struct test_test_info __start_test, __stop_test;
 	test_case_info[test_case_depth].line = __LINE__; \
 	test_case_info[test_case_depth].outpos = lseek(currtest->outfd, 0, SEEK_CUR); \
 \
-	switch (fork()) { \
+	switch (TEST_FORK_IMPL_) { \
 	case -1: \
 		perror("fork"); \
 		exit(EXIT_FAILURE); \
@@ -137,7 +149,8 @@ extern struct test_test_info __start_test, __stop_test;
 			exit(WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE); \
 	} \
 	} \
-	for (;0;exit(EXIT_SUCCESS)) TOKENPASTE(test_case_run_, __LINE__):
+	for (;0;TEST_CASE_EXIT_IMPL) TOKENPASTE(test_case_run_, __LINE__):
+
 
 #define TEST_VAR(name) \
 	static struct test_test_info test_##name __attribute__((unused, section("test")))
@@ -158,7 +171,7 @@ extern struct test_test_info __start_test, __stop_test;
 	if (!(c)) {  \
 		fprintf(stderr, "%s:%u: " ANSI_ORANGE ANSI_BOLD "Assertion" ANSI_RESET " %s\n", \
 			__FILE__, __LINE__, msg); \
-		exit(EXIT_FAILURE); \
+		FAILURE(EXIT_FAILURE); \
 	}
 
 #define assert(c) \
@@ -180,7 +193,7 @@ do { \
 	if (!(cmp)) {  \
 		fprintf(stderr, "%s:%u: " ANSI_ORANGE ANSI_BOLD "Expected" ANSI_RESET " " fmt ", got " fmt ".\n", \
 			__FILE__, __LINE__, exp, act); \
-		exit(EXIT_FAILURE); \
+		FAILURE(EXIT_FAILURE); \
 	} \
 } while (0);
 

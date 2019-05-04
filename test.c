@@ -94,6 +94,9 @@ void sighandler(int sig, siginfo_t *info, void *ucontext)
 	void *array[50];
 	int size;
 
+#ifdef TEST_NOFORK
+	fputs("*** >>> forking disabled <<< ***\n", stderr);
+#endif
 	fprintf(stderr, "*** %s, address is %p\n\n",
 		strsignal(sig), info->si_addr);
 
@@ -206,7 +209,7 @@ int main(int argc, char **argv) {
 		}
 
 		if (skip || 0 == currtest->repeat) {
-		skip_test:
+		test_skip:
 			++stat[test_skipped];
 			fprintf(stdout, ANSI_BLUE ANSI_BOLD "skipped" ANSI_RESET "\n");
 			goto drop_output;
@@ -219,7 +222,7 @@ int main(int argc, char **argv) {
 		}
 
 		*shm_total_ns = -1;
-		switch (fork()) {
+		switch (TEST_FORK_IMPL_) {
 		case -1:
 			perror("fork");
 			exit(EXIT_FAILURE);
@@ -227,25 +230,42 @@ int main(int argc, char **argv) {
 			struct timespec ts_start;
 			struct timespec ts_end;
 			unsigned repeat = currtest->repeat;
-
-			/* Run test in forked children. */
+#ifdef TEST_NOFORK
+			int result = EXIT_SUCCESS;
+			int oldstderr = dup(STDERR_FILENO);
+			int oldstdout = dup(STDOUT_FILENO);
+#endif
 			dup2(currtest->outfd, STDERR_FILENO);
 			dup2(currtest->outfd, STDOUT_FILENO);
 
-			/* Do not buffer output streams. */
 			setvbuf(stdout, NULL, _IONBF, 0);
 			setvbuf(stderr, NULL, _IONBF, 0);
 
 			clock_gettime(CLOCK_MONOTONIC, &ts_start);
+#ifndef TEST_NOFORK
 			while (repeat-- > 0)
 				currtest->run();
+#else
+			test_case_depth = 0;
+			while (repeat-- > 0 && EXIT_SUCCESS != (currtest->run(&result), result))
+				;
+#endif
 			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
 			tsdiff(&ts_end, &ts_start, &ts_start);
 			*shm_total_ns = tstons(&ts_start);
 
+#ifndef TEST_NOFORK
 			exit(EXIT_SUCCESS);
-			break;
+#else
+			dup2(oldstderr, STDERR_FILENO);
+			dup2(oldstdout, STDOUT_FILENO);
+
+			if (EXIT_SUCCESS == result)
+				goto test_passed;
+			else
+				goto test_failed;
+#endif
 		}
 		default: {
 			int stat_val;
@@ -257,9 +277,10 @@ int main(int argc, char **argv) {
 				case EXIT_SUCCESS: {
 					char info[50];
 
+				test_passed:
 					if (-1 == *shm_total_ns) {
 						fprintf(stdout, ANSI_RED ANSI_BOLD "EARLY" ANSI_RESET "\n");
-						goto test_failed;
+						goto test_fail_action;
 					}
 
 					currtest->total_ns = *shm_total_ns;
@@ -281,15 +302,16 @@ int main(int argc, char **argv) {
 					goto drop_output;
 				}
 				case 77: /* Special exit code. */
-					goto skip_test;
+					goto test_skip;
 				default: /* Others. */
+				test_failed:
 					fprintf(stdout, ANSI_RED ANSI_BOLD "FAILED" ANSI_RESET "\n");
-					goto test_failed;
+					goto test_fail_action;
 				}
 			} else {
 				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG(%02u)" ANSI_RESET "\n",
 					WTERMSIG(stat_val));
-			test_failed:
+			test_fail_action:
 				++stat[test_failed];
 #ifdef TEST_NOGATHEROUTPUT
 				cat(currtest->outfd);
