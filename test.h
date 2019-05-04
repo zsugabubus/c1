@@ -24,10 +24,6 @@
 #include <sys/wait.h> /* wait */
 #include <unistd.h> /* fork, dup2 */
 
-#ifndef TEST_OUTPUT
-# define TEST_OUTPUT 'A'
-#endif
-
 #ifndef TEST_CASESEP
 # define TEST_CASESEP " / "
 #endif
@@ -70,10 +66,10 @@ struct test_test_info {
 	char const *const desc;
 	char const *const file;
 	unsigned line;
-	int outfd;
-	int status;
 	unsigned long repeat;
+	int outfd;
 	unsigned long total_ns;
+	char a[4];
 };
 
 extern int test_case_depth;
@@ -97,7 +93,7 @@ extern struct test_test_info __start_test, __stop_test;
 
 #define BENCH_(static_void, name, desc, repeat) \
 	static_void name(void); \
-	TEST_VAR(name) = {name, desc, __FILE__, __LINE__, -1, 0, repeat}; \
+	TEST_VAR(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
 	static_void name(void)
 
 #define CASE(name) \
@@ -131,18 +127,20 @@ extern struct test_test_info __start_test, __stop_test;
 		goto TOKENPASTE(test_case_run_, __LINE__); \
 	} \
 	default: { \
-		int status; \
-		wait(&status); \
-		if (EXIT_SUCCESS == status) \
+		int stat_val; \
+		wait(&stat_val); \
+		if (WIFEXITED(stat_val) && EXIT_SUCCESS == WEXITSTATUS(stat_val)) \
+			/* Drop output of passed cases. */ \
 			ftruncate(currtest->outfd, test_case_info[test_case_depth].outpos); \
 		else \
-			exit(EXIT_FAILURE); \
+			/* Propagate exit code. */ \
+			exit(WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE); \
 	} \
 	} \
 	for (;0;exit(EXIT_SUCCESS)) TOKENPASTE(test_case_run_, __LINE__):
 
 #define TEST_VAR(name) \
-	static struct test_test_info test_##name __attribute__((unused)) __attribute__((section("test")))
+	static struct test_test_info test_##name __attribute__((unused, section("test")))
 
 #define UNIT(name) \
 	UNITD(#name)
@@ -151,7 +149,7 @@ extern struct test_test_info __start_test, __stop_test;
 	UNIT_(desc)
 
 #define UNIT_(desc) \
-	TEST_VAR(unit) = {NULL, desc, __FILE__, 0, -1, 0};
+	TEST_VAR(unit) = {NULL, desc, __FILE__, 0, 0, -1};
 
 #define TOKENPASTE_(a, b) a##b
 #define TOKENPASTE(a, b) TOKENPASTE_(a, b)

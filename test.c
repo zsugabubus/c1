@@ -111,6 +111,7 @@ int main(int argc, char **argv) {
 	enum { test_unit, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
 	int width = 0;
+	int gathered = 0;
 	unsigned long *shm_total_ns;
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle;
@@ -168,7 +169,6 @@ int main(int argc, char **argv) {
 	}
 
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
-		char succ_info[50];
 		int argi;
 		int skip;
 
@@ -206,9 +206,10 @@ int main(int argc, char **argv) {
 		}
 
 		if (skip || 0 == currtest->repeat) {
+		skip_test:
 			++stat[test_skipped];
 			fprintf(stdout, ANSI_BLUE ANSI_BOLD "skipped" ANSI_RESET "\n");
-			continue;
+			goto drop_output;
 		}
 
 		currtest->outfd = memfd_create(currtest->desc, 0);
@@ -217,6 +218,7 @@ int main(int argc, char **argv) {
 			exit(EXIT_FAILURE);
 		}
 
+		*shm_total_ns = -1;
 		switch (fork()) {
 		case -1:
 			perror("fork");
@@ -245,70 +247,90 @@ int main(int argc, char **argv) {
 			exit(EXIT_SUCCESS);
 			break;
 		}
-		default:
-			/* Wait test to be finished. */ \
-			wait(&currtest->status);
+		default: {
+			int stat_val;
+			/* Wait test to finish. */
+			wait(&stat_val);
+			/* Exited normally. */
+			if (WIFEXITED(stat_val)) {
+				switch (WEXITSTATUS(stat_val)) {
+				case EXIT_SUCCESS: {
+					char info[50];
 
-			currtest->total_ns = *shm_total_ns;
+					if (-1 == *shm_total_ns) {
+						fprintf(stdout, ANSI_RED ANSI_BOLD "EARLY" ANSI_RESET "\n");
+						goto test_failed;
+					}
 
-			++stat[(EXIT_SUCCESS == currtest->status ? test_passed : test_failed)];
+					currtest->total_ns = *shm_total_ns;
 
-			if (EXIT_SUCCESS == currtest->status) {
-				if (currtest->repeat <= 1)
-					sprintf(succ_info, ", %4lu %s",
-						nstohtime(currtest->total_ns),
-						nstohunit(currtest->total_ns));
-				else
-					sprintf(succ_info, ", %4lu %s / %9lu iters = %4lu %s/iter",
-						nstohtime(currtest->total_ns),
-						nstohunit(currtest->total_ns),
-						currtest->repeat,
-						nstohtime((currtest->total_ns + currtest->repeat - 1) / currtest->repeat),
-						nstohunit((currtest->total_ns + currtest->repeat - 1) / currtest->repeat));
-			} else {
-				succ_info[0] = '\0';
-			}
+					if (currtest->repeat <= 1)
+						sprintf(info, "%4lu %s",
+							nstohtime(currtest->total_ns),
+							nstohunit(currtest->total_ns));
+					else
+						sprintf(info, "%4lu %s / %9lu iters = %4lu %s/iter",
+							nstohtime(currtest->total_ns),
+							nstohunit(currtest->total_ns),
+							currtest->repeat,
+							nstohtime((currtest->total_ns + currtest->repeat - 1) / currtest->repeat),
+							nstohunit((currtest->total_ns + currtest->repeat - 1) / currtest->repeat));
 
-			fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET "%s\n",
-				EXIT_SUCCESS == currtest->status
-				 ? ANSI_GREEN "ok"
-				 : ANSI_RED "FAILED",
-				succ_info);
-
-			if ('I' == TEST_OUTPUT) {
-				if (EXIT_SUCCESS != currtest->status) {
-					cat(currtest->outfd);
+					++stat[test_passed];
+					fprintf(stdout, ANSI_GREEN ANSI_BOLD "ok" ANSI_RESET ", %s\n", info);
+					goto drop_output;
 				}
+				case 77: /* Special exit code. */
+					goto skip_test;
+				default: /* Others. */
+					fprintf(stdout, ANSI_RED ANSI_BOLD "FAILED" ANSI_RESET "\n");
+					goto test_failed;
+				}
+			} else {
+				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG(%02u)" ANSI_RESET "\n",
+					WTERMSIG(stat_val));
+			test_failed:
+				++stat[test_failed];
+#ifdef TEST_NOGATHEROUTPUT
+				cat(currtest->outfd);
+#else
+				continue; /* Keep output. */
+#endif
 			}
 		}
+		}
 
+	drop_output:
+		close(currtest->outfd);
+		currtest->outfd = -1;
 	}
 
 	munmap(shm_total_ns, sizeof(*shm_total_ns));
 
-	if ('A' == TEST_OUTPUT && stat[test_failed] > 0) {
-		print_hline(width, '=');
-
-		for (currtest = &__start_test;++currtest < &__stop_test;) {
-			if (EXIT_SUCCESS != currtest->status) {
-				fprintf(stderr, "test " ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n",
-					currtest->desc, currtest->file, currtest->line);
-				cat(currtest->outfd);
-				fprintf(stderr, "\n");
-			}
-		}
-	}
-
+#ifndef TEST_NOGATHEROUTPUT
 	print_hline(width, '=');
+	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
+		if (-1 == currtest->outfd)
+			continue;
 
+		gathered = 1;
+		fprintf(stderr, "test " ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n",
+			currtest->desc, currtest->file, currtest->line);
+		cat(currtest->outfd);
+
+		close(currtest->outfd);
+		currtest->outfd = -1;
+	}
+#endif
+
+	if (gathered)
+		print_hline(width, '=');
 	fprintf(stdout,
 		ANSI_BOLD "test result" ANSI_RESET ": " ANSI_BOLD "%s" ANSI_RESET ". "
 		ANSI_GREEN "%u passed"  ANSI_RESET "; "
 		ANSI_RED   "%u failed"  ANSI_RESET "; "
 		ANSI_BLUE  "%u skipped" ANSI_RESET "\n",
-		0 == stat[test_failed]
-		 ? ANSI_GREEN "ok"
-		 : ANSI_RED "FAILED",
+		0 == stat[test_failed] ? ANSI_GREEN "ok" : ANSI_RED "FAILED",
 		stat[test_passed],
 		stat[test_failed],
 		stat[test_skipped]);
@@ -317,8 +339,6 @@ int main(int argc, char **argv) {
 	dlclose(dlhandle);
 #endif
 
-	exit(0 == stat[test_failed]
-		 ? EXIT_SUCCESS
-		 : EXIT_FAILURE);
+	exit(0 == stat[test_failed] ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 /* vim:set ft=c ts=4 sw=4 noet: */
