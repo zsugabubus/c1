@@ -120,12 +120,11 @@ int main(int argc, char **argv) {
 		/* Don't treat it fatal error. */
 		perror("dlopen");
 #else
-	struct sigaction sigact;
+	struct sigaction sa;
+	sa.sa_sigaction = sighandler;
+	sa.sa_flags = SA_RESTART | SA_SIGINFO;
 
-	sigact.sa_sigaction = sighandler;
-	sigact.sa_flags = SA_RESTART | SA_SIGINFO;
-
-	if (sigaction(SIGSEGV, &sigact, NULL)) {
+	if (sigaction(SIGSEGV, &sa, NULL)) {
 		perror("sigaction");
 		exit(EXIT_FAILURE);
 	}
