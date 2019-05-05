@@ -17,9 +17,8 @@
 #define _GNU_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
 # include <dlfcn.h> /* dlopen */
-#else
-# include <execinfo.h> /* backtrace, backtrace_symbols_fd */
 #endif
+#include <execinfo.h> /* backtrace, backtrace_symbols_fd */
 #include <limits.h> /* LONG_MAX */
 #include <signal.h> /* signal */
 #include <sys/mman.h> /* memfd_create */
@@ -88,8 +87,7 @@ static void print_hline(int n, char ch) {
 	fputc('\n', stdout);
 }
 
-#ifdef TEST_NOLIBSEGFAULT
-void sighandler(int sig, siginfo_t *info, void *ucontext)
+static void sighandler(int sig, siginfo_t *info, void *ucontext)
 {
 	void *array[50];
 	int size;
@@ -107,7 +105,6 @@ void sighandler(int sig, siginfo_t *info, void *ucontext)
 
 	exit(EXIT_FAILURE);
 }
-#endif
 
 int main(int argc, char **argv) {
 
@@ -118,12 +115,8 @@ int main(int argc, char **argv) {
 	unsigned long *shm_total_ns;
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle;
+#endif
 
-	dlhandle = dlopen("/lib/libSegFault.so", RTLD_LAZY);
-	if (!dlhandle)
-		/* Don't treat it fatal error. */
-		perror("dlopen");
-#else
 	struct sigaction sa;
 	sa.sa_sigaction = sighandler;
 	sa.sa_flags = SA_RESTART | SA_SIGINFO;
@@ -132,6 +125,12 @@ int main(int argc, char **argv) {
 		perror("sigaction");
 		exit(EXIT_FAILURE);
 	}
+
+#ifndef TEST_NOLIBSEGFAULT
+	dlhandle = dlopen("/lib/libSegFault.so", RTLD_LAZY);
+	if (!dlhandle)
+		/* Don't treat it fatal error. */
+		perror("dlopen");
 #endif
 
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
