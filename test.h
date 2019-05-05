@@ -28,7 +28,7 @@
 # define TEST_CASESEP " / "
 #endif
 
-#ifndef TEST_NOANSIES
+#ifndef TEST_NOSTYLES
 # define ANSI_BOLD  "\x1b[1m"
 # define ANSI_RESET "\x1b[0m"
 # ifndef TEST_NOCOLORS
