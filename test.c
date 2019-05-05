@@ -223,6 +223,7 @@ int main(int argc, char **argv) {
 	unsigned long *shm_total_ns;
 	struct timespec ts_start;
 	struct timespec ts_end;
+	int nullfd;
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle; /* Handle fo libSegFault */
 #endif
@@ -243,6 +244,9 @@ int main(int argc, char **argv) {
 		/* Don't treat it fatal error. */
 		perror("dlopen");
 #endif
+
+	if (-1 == (nullfd = open("/dev/null", O_WRONLY)))
+		perror("open");
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
@@ -377,15 +381,15 @@ int main(int argc, char **argv) {
 #ifdef TEST_NOFORK
 			int result = EXIT_SUCCESS;
 			int oldstderr = dup(STDERR_FILENO);
-# ifdef TEST_OUTPUT_HUMAN
 			int oldstdout = dup(STDOUT_FILENO);
-# endif
 #endif
 			dup2(currtest->outfd, STDERR_FILENO);
 			setvbuf(stderr, NULL, _IONBF, 0);
 #ifdef TEST_OUTPUT_HUMAN
 			dup2(currtest->outfd, STDOUT_FILENO);
 			setvbuf(stdout, NULL, _IONBF, 0);
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+			dup2(nullfd, STDOUT_FILENO);
 #endif
 
 			clock_gettime(CLOCK_MONOTONIC, &ts_test_start);
@@ -406,9 +410,7 @@ int main(int argc, char **argv) {
 			exit(EXIT_SUCCESS);
 #else
 			dup2(oldstderr, STDERR_FILENO);
-# ifdef TEST_OUTPUT_HUMAN
 			dup2(oldstdout, STDOUT_FILENO);
-# endif
 
 			if (EXIT_SUCCESS == result)
 				goto test_passed;
