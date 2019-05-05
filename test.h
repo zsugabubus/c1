@@ -34,24 +34,18 @@
 # ifndef TEST_NOCOLORS
 #  define ANSI_RED "\x1b[31m"
 #  define ANSI_GREEN "\x1b[32m"
-#  define ANSI_ORANGE "\x1b[33m"
 #  define ANSI_BLUE "\x1b[34m"
-#  define ANSI_MAGENTA "\x1b[35m"
 # else
 #  define ANSI_RED ""
 #  define ANSI_GREEN ""
-#  define ANSI_ORANGE ""
 #  define ANSI_BLUE ""
-#  define ANSI_MAGENTA ""
 # endif
 #else
 #define ANSI_BOLD  ""
 #define ANSI_RESET ""
 #define ANSI_RED ""
 #define ANSI_GREEN ""
-#define ANSI_ORANGE ""
 #define ANSI_BLUE ""
-#define ANSI_MAGENTA ""
 #endif
 
 #ifndef TEST_NOFORK
@@ -66,6 +60,19 @@
 # define FAILURE(code) do { *_test_result = (code); return; } while (0);
 #endif
 
+/** Info about tests and suites. */
+struct test_test_info {
+	void(*const run)(TEST_PARAM_)  __attribute__((aligned(16)));
+	char const *const desc;
+	char const *const file;
+	unsigned line;
+	unsigned long const iters;
+	int outfd;
+	unsigned long total_ns;
+	char a[4];
+};
+
+/** Info about test case. */
 struct test_case_info {
 	char const *name;
 	char const *file;
@@ -73,46 +80,52 @@ struct test_case_info {
 	off_t outpos;
 };
 
-struct test_test_info {
-	void(*const run)(TEST_PARAM_)  __attribute__((aligned(16)));
-	char const *const desc;
-	char const *const file;
-	unsigned line;
-	unsigned long repeat;
-	int outfd;
-	unsigned long total_ns;
-	char a[4];
-};
-
 extern int test_case_depth;
 extern struct test_case_info test_case_info[7];
 extern struct test_test_info *currtest;
-__attribute__((section("test")))
-extern struct test_test_info __start_test, __stop_test;
+
+/* Default XML output. */
+#ifdef TEST_OUTPUT_XML
+# define TEST_OUTPUT_LIBCHECKXML
+#endif
+
+/* Default output format. */
+#if !defined(TEST_OUTPUT_HUMAN) && \
+    !defined(TEST_OUTPUT_LIBCHECKXML)
+# define TEST_OUTPUT_HUMAN
+#endif
 
 #define BENCH(name, repeat) \
 	BENCH_(void, name, #name, repeat)
+
+#define BENCHND(name, desc, repeat) \
+	BENCH_(void, name, desc, repeat)
 
 /* Must be static, because we can't generate unique names. */
 #define BENCHD(desc, repeat) \
 	BENCH_(static void, TOKENPASTE(test_at_line_, __LINE__), desc, repeat)
 
+/* Test is just a bench that runs once. */
 #define TEST(name) \
 	BENCH(name, 1)
 
 #define TESTD(desc) \
 	BENCHD(desc, 1)
 
+#define TESTND(name, desc) \
+	BENCHD(name, desc, 1)
+
+/* Have to hack with rtype, because empty macro argument is not valid. */
 #define BENCH_(static_rtype, name, desc, repeat) \
 	static_rtype name(TEST_PARAM_); \
-	TEST_VAR(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
+	TEST_VAR_(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
 	static_rtype name(TEST_PARAM_)
 
 #define CASE(name) \
 	CASED(#name)
 
 #define CASED(case_desc) \
-	assert_msg_(test_case_depth < (sizeof(test_case_info) / sizeof(*test_case_info)), "cannot nest more cases"); \
+	assert_msg(test_case_depth < (sizeof(test_case_info) / sizeof(*test_case_info)), "cannot nest more cases"); \
 	test_case_info[test_case_depth].name = (case_desc); \
 	test_case_info[test_case_depth].file = __FILE__; \
 	test_case_info[test_case_depth].line = __LINE__; \
@@ -126,12 +139,13 @@ extern struct test_test_info __start_test, __stop_test;
 		int i; \
 		++test_case_depth; \
 \
-		fprintf(stderr, "case "); \
+		/* Prints what test cases we are in. */ \
+		fprintf(stdout, "case "); \
 		for (i = 0;i < test_case_depth - 1;++i) \
-			fprintf(stderr, ANSI_BOLD "%s" ANSI_RESET TEST_CASESEP, \
+			fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET TEST_CASESEP, \
 				test_case_info[i].name); \
 \
-		fprintf(stderr, ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n", \
+		fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n", \
 			test_case_info[i].name, \
 			test_case_info[i].file, \
 			test_case_info[i].line \
@@ -140,71 +154,81 @@ extern struct test_test_info __start_test, __stop_test;
 	} \
 	default: { \
 		int stat_val; \
+		 /* Wait test to finish. */ \
 		wait(&stat_val); \
 		if (WIFEXITED(stat_val) && EXIT_SUCCESS == WEXITSTATUS(stat_val)) \
-			/* Drop output of passed cases. */ \
+			/* We don't care about output of passed cases. */ \
 			ftruncate(currtest->outfd, test_case_info[test_case_depth].outpos); \
 		else \
-			/* Propagate exit code. */ \
+			/* Propagate *exit code*. */ \
 			exit(WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE); \
 	} \
 	} \
 	for (;0;TEST_CASE_EXIT_IMPL) TOKENPASTE(test_case_run_, __LINE__):
 
+#define TEST_VAR_(name) \
+	static struct test_test_info test_##name __attribute__((no_reorder, __used__, unused, __section__("test"))) \
 
-#define TEST_VAR(name) \
-	static struct test_test_info test_##name __attribute__((unused, section("test")))
+#define SUITE(name) \
+	SUITED(#name)
 
-#define UNIT(name) \
-	UNITD(#name)
+#define SUITED(desc) \
+	SUITE_(desc)
 
-#define UNITD(desc) \
-	UNIT_(desc)
-
-#define UNIT_(desc) \
-	TEST_VAR(unit) = {NULL, desc, __FILE__, 0, 0, -1};
+#define SUITE_(desc) \
+	TEST_VAR_(unit) = {NULL, desc, __FILE__, 0, 0, -1};
 
 #define TOKENPASTE_(a, b) a##b
 #define TOKENPASTE(a, b) TOKENPASTE_(a, b)
 
-#define assert_msg_(c, msg) \
+#ifdef TEST_OUTPUT_HUMAN
+# define TEST_ASSERT_FORMAT \
+	"%s:%u: " ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed.\n", __FILE__, __LINE__
+# define TEST_EXPECT_FORMAT(fmt) \
+	"%s:%u: " ANSI_RED ANSI_BOLD "Expected" ANSI_RESET " " fmt ", got " fmt ".\n", __FILE__, __LINE__
+#else
+# define TEST_ASSERT_FORMAT \
+	"Assertion %s failed"
+# define TEST_EXPECT_FORMAT(fmt) \
+	"Expected " fmt ", got " fmt
+#endif
+
+#define assert_msg(c, msg) \
 	if (!(c)) {  \
-		fprintf(stderr, "%s:%u: " ANSI_ORANGE ANSI_BOLD "Assertion" ANSI_RESET " %s\n", \
-			__FILE__, __LINE__, msg); \
+		fprintf(stderr, TEST_ASSERT_FORMAT, msg); \
 		FAILURE(EXIT_FAILURE); \
 	}
 
 #define assert(c) \
-	assert_msg_(c, "`" #c "' failed.")
+	assert_msg(c, "`" #c "'")
 
 #define assert_eq(lhs, rhs) \
 	assert(lhs == rhs);
 
-#define assert_cstreq(lhs, rhs) \
+#define assert_streq(lhs, rhs) \
 	assert(0 == strcmp(lhs, rhs));
 
 #define assert_memeq(lhs, rhs, size) \
 	assert(0 == memcmp(lhs, rhs, size));
 
-#define expect_msg_(expected, actual, type, cmp, fmt) \
+#define expect_msg(exp, act, type, cmp, fmt) \
 do { \
-	type exp = (expected); \
-	type act = (actual); \
+	type const EXP = (exp); \
+	type const ACT = (act); \
 	if (!(cmp)) {  \
-		fprintf(stderr, "%s:%u: " ANSI_ORANGE ANSI_BOLD "Expected" ANSI_RESET " " fmt ", got " fmt ".\n", \
-			__FILE__, __LINE__, exp, act); \
+		fprintf(stderr, TEST_EXPECT_FORMAT(fmt), EXP, ACT); \
 		FAILURE(EXIT_FAILURE); \
 	} \
 } while (0);
 
-#define expect_int(expected, actual) \
-	expect_msg_(expected, actual, long int const, (exp == act), "%ld")
+#define expect_int(exp, act) \
+	expect_msg(exp, act, long int const, (EXP == ACT), "%ld")
 
-#define expect_uint(expected, actual) \
-	expect_msg_(expected, actual, long unsigned const, (exp == act), "%lu")
+#define expect_uint(exp, act) \
+	expect_msg(exp, act, long unsigned const, (EXP == ACT), "%lu")
 
-#define expect_str(expected, actual) \
-	expect_msg_(expected, actual, char const*, (0 == strcmp(exp, act)), "`%s'")
+#define expect_str(exp, act) \
+	expect_msg(exp, act, char const*, (0 == strcmp(EXP, ACT)), "`%s'")
 
 #endif /* TEST_H */
 /* vim:set ft=c ts=4 sw=4 noet: */

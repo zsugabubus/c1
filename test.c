@@ -26,15 +26,57 @@
 
 #include "test.h"
 
+#ifdef TEST_OUTPUT_LIBCHECKXML
+# include <libgen.h> /* dirname, basename */
+# define FORMAT_LIBCHECK_TEMPLATE_START \
+	"<?xml version=\"1.0\"?>\n" \
+	"<?xml-stylesheet type=\"text/xsl\"" \
+	" href=\"http://check.sourceforge.net/xml/check_unittest.xslt\"?>\n" \
+	"<testsuites xmlns=\"http://check.sourceforge.net/ns\">\n" \
+	"  <datetime>%s</datetime>\n",
+# define FORMAT_LIBCHECK_TEMPLATE_SUITE_START \
+	"  <suite>\n" \
+	"    <title>%s<title>\n"
+# define FORMAT_LIBCHECK_TEMPLATE_TEST \
+	"    <test result=\"%s\">\n" \
+	"      <path>%s</path>\n" \
+	"      <fn>%s:%u</fn>\n" \
+	"      <id>%s</id>\n" \
+	"      <iteration>%ld</iteration>\n" \
+	"      <duration>%.6f</duration>\n" \
+	"      <description>%s</description>\n" \
+	"      <message>%s</message>\n" \
+	"    </test>\n"
+# define FORMAT_LIBCHECK_TEMPLATE_SUITE_END \
+	"  </suite>\n"
+# define FORMAT_LIBCHECK_TEMPLATE_END \
+	"  <duration>%.6f</duration>\n" \
+	"</testsuites>\n"
+#endif
+
+#define FREE __attribute__((cleanup(varfree)))
+#define CONST __attribute__((const))
+#define UNUSED __attribute__((unused))
+
+extern struct test_test_info __start_test, __stop_test;
+
 int test_case_depth = 0;
 struct test_case_info test_case_info[7];
 struct test_test_info *currtest;
+
+/* Free variable. */
+UNUSED static
+void varfree(char *const*const var) {
+	free(*var);
+}
 
 #define US_NS 1000ul
 #define MS_NS 1000000ul
 #define SEC_NS 1000000000ul
 
-static void cat(int fd) {
+/** Write content of `fd` to stderr. */
+static
+void cat(int fd) {
 	char buf[(1 << 12)];
 	ssize_t len = 0;
 	ssize_t plen;
@@ -48,7 +90,9 @@ static void cat(int fd) {
 	fputc('\n', stderr);
 }
 
-static unsigned long nstohtime(unsigned long ns) {
+/** Return a time unit that makes sense for human beings. */
+CONST static
+unsigned long nstohtime(unsigned long ns) {
 	if (ns < 10 * US_NS)
 		return ns;
 	else if (ns < 10 * MS_NS)
@@ -59,7 +103,9 @@ static unsigned long nstohtime(unsigned long ns) {
 		return ns / SEC_NS;
 }
 
-static char const *nstohunit(unsigned long ns) {
+/** Return time value that matches with human time unit. */
+CONST static
+char const *nstohunit(unsigned long ns) {
 	if (ns < 10 * US_NS)
 		return "ns";
 	else if (ns < 10 * MS_NS)
@@ -70,31 +116,38 @@ static char const *nstohunit(unsigned long ns) {
 		return "s";
 }
 
-static unsigned long tstons(struct timespec const *const ts) {
+/** Return time in nanoseconds. */
+CONST static
+unsigned long tstons(struct timespec const *const ts) {
 	return ts->tv_sec * SEC_NS + ts->tv_nsec;
 }
 
-static void tsdiff(struct timespec *end, struct timespec *start, struct timespec *result) {
+/** Compute elapsed time from `start` time to `end` time. Write result into `result`. */
+static
+void tsdiff(struct timespec const *end, struct timespec const *start, struct timespec *result) {
 	result->tv_sec  = end->tv_sec  - start->tv_sec  + (end->tv_nsec < start->tv_nsec);
 	result->tv_nsec = end->tv_nsec - start->tv_nsec + (end->tv_nsec < start->tv_nsec ? SEC_NS : 0);
 }
 
-static void print_hline(int n, char ch) {
+#ifdef TEST_OUTPUT_HUMAN
+/** Print a `n` character wide horizontal separator using `ch` character. */
+static
+void print_hline(int n, char ch) {
 	int i;
 
 	for (i = 0;i < n;++i)
 		fputc(ch, stdout);
 	fputc('\n', stdout);
 }
+#endif
 
-static void sighandler(int sig, siginfo_t *info, void *ucontext)
+/** Default signal handler. */
+static
+void sighandler(int sig, siginfo_t *info, void *ucontext)
 {
 	void *array[50];
 	int size;
 
-#ifdef TEST_NOFORK
-	fputs("*** >>> forking disabled <<< ***\n", stderr);
-#endif
 	fprintf(stderr, "*** %s, address is %p\n\n",
 		strsignal(sig), info->si_addr);
 
@@ -106,16 +159,74 @@ static void sighandler(int sig, siginfo_t *info, void *ucontext)
 	exit(EXIT_FAILURE);
 }
 
+#if TEST_OUTPUT_XML
+/** XML escape `text`. */
+static
+char *xmlesc(char const *const text) {
+	char const *inp;
+	char *esctext = NULL;
+	char *outp = 0;
+
+#define EMIT(e) \
+	if (esctext) \
+		outp = memcpy(outp, e, sizeof(e) - sizeof(char)) + sizeof(e) / sizeof(char) - 1; \
+	else \
+		outp += sizeof(e) / sizeof(char) - 1; \
+	break;
+
+escape:
+	/* Computes length in the first pass, writes in the second. */
+	for (inp = text - 1;;) {
+		switch (*++inp) {
+		default:
+			if (esctext)
+				*outp++ = *inp;
+			else
+				++outp;
+			break;
+		case '"':  EMIT("&quot;")
+		case '&':  EMIT("&amp;");
+		case '\'': EMIT("&apos;");
+		case '<':  EMIT("&lt;");
+		case '>':  EMIT("&gt;");
+		case '\0': 
+			if (esctext)
+				*outp = '\0';
+			else
+				++outp;
+			goto end_loop;
+		}
+	}
+end_loop:
+#undef EMIT
+
+	if (!esctext) {
+		esctext = outp = malloc((size_t)outp);
+		if (!esctext) {
+			fprintf(stderr, "malloc: unable to allocate %lu bytes",
+				(size_t)outp);
+			exit(EXIT_FAILURE);
+		}
+		goto escape;
+	}
+
+	return esctext;
+}
+#endif
+
 int main(int argc, char **argv) {
 
-	enum { test_unit, test_total, test_passed, test_failed, test_skipped, test_result_count };
+	enum { test_suite, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
 	int width = 0;
-	int gathered = 0;
+	int gathered UNUSED = 0;
 	unsigned long *shm_total_ns;
+	struct timespec ts_start;
+	struct timespec ts_end;
 #ifndef TEST_NOLIBSEGFAULT
-	void *dlhandle;
+	void *dlhandle; /* Handle fo libSegFault */
 #endif
+	struct test_test_info *currsuite = NULL; /** Active suite. */
 
 	struct sigaction sa;
 	sa.sa_sigaction = sighandler;
@@ -133,11 +244,18 @@ int main(int argc, char **argv) {
 		perror("dlopen");
 #endif
 
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
 		int len;
 		
+		/* Too lazy to make another struct for suites. */
 		if (currtest->run) {
 			++stat[test_total];
+
+			/* Count tests in suites. */
+			if (currsuite)
+				++currsuite->line;
 
 			if (!currtest->desc)
 				continue;
@@ -147,7 +265,8 @@ int main(int argc, char **argv) {
 				width = len;
 
 		} else {
-			++stat[test_unit];
+			currsuite = currtest;
+			++stat[test_suite];
 
 			len = 5 + strlen(currtest->desc) + strlen(currtest->file) + 4;
 			if (len > width)
@@ -158,8 +277,24 @@ int main(int argc, char **argv) {
 	if (width > 72)
 		width = 72;
 
+#ifdef TEST_OUTPUT_HUMAN
 	fprintf(stdout, "running %u tests\n",
 		stat[test_total]);
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+	{
+		char datetime[23];
+		time_t now = time(NULL);
+		struct tm *localnow = localtime(&now);
+		if (!localnow) {
+			perror("localtime");
+			exit(EXIT_FAILURE);
+		}
+
+		strftime(datetime, sizeof(datetime), "%Y-%m-%d %T", localnow);
+		fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_START
+			datetime);
+	}
+#endif
 
 	shm_total_ns = mmap(NULL, sizeof(*shm_total_ns),
 		PROT_READ | PROT_WRITE,
@@ -170,22 +305,30 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
+	currsuite = NULL;
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
 		int argi;
 		int skip;
 
 		if (!currtest->run) {
-			fprintf(stdout, "\nunit " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
+			currsuite = currtest;
+#ifdef TEST_OUTPUT_HUMAN
+			fprintf(stdout, "\nsuite " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
 				currtest->desc, currtest->file);
-
 			print_hline(width, '-');
-			continue;
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+			fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_SUITE_START,
+				currtest->desc);
+#endif
+			goto next_test;
 		}
 
+#ifdef TEST_OUTPUT_HUMAN
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
 			currtest->desc,
 			width - 17 - (int)strlen(currtest->desc), "");
 		fflush(stdout);
+#endif
 
 		for (skip = 0, argi = 1;argi < argc;++argi) {
 			char *filter = argv[argi];
@@ -207,10 +350,12 @@ int main(int argc, char **argv) {
 				skip = should_skip;
 		}
 
-		if (skip || 0 == currtest->repeat) {
+		if (skip || 0 == currtest->iters) {
 		test_skip:
 			++stat[test_skipped];
+#ifdef TEST_OUTPUT_HUMAN
 			fprintf(stdout, ANSI_BLUE ANSI_BOLD "skipped" ANSI_RESET "\n");
+#endif
 			goto drop_output;
 		}
 
@@ -226,39 +371,44 @@ int main(int argc, char **argv) {
 			perror("fork");
 			exit(EXIT_FAILURE);
 		case 0: {
-			struct timespec ts_start;
-			struct timespec ts_end;
-			unsigned repeat = currtest->repeat;
+			struct timespec ts_test_start;
+			struct timespec ts_test_end;
+			unsigned iters = currtest->iters;
 #ifdef TEST_NOFORK
 			int result = EXIT_SUCCESS;
 			int oldstderr = dup(STDERR_FILENO);
+# ifdef TEST_OUTPUT_HUMAN
 			int oldstdout = dup(STDOUT_FILENO);
+# endif
 #endif
 			dup2(currtest->outfd, STDERR_FILENO);
-			dup2(currtest->outfd, STDOUT_FILENO);
-
-			setvbuf(stdout, NULL, _IONBF, 0);
 			setvbuf(stderr, NULL, _IONBF, 0);
+#ifdef TEST_OUTPUT_HUMAN
+			dup2(currtest->outfd, STDOUT_FILENO);
+			setvbuf(stdout, NULL, _IONBF, 0);
+#endif
 
-			clock_gettime(CLOCK_MONOTONIC, &ts_start);
+			clock_gettime(CLOCK_MONOTONIC, &ts_test_start);
 #ifndef TEST_NOFORK
-			while (repeat-- > 0)
+			while (iters-- > 0)
 				currtest->run();
 #else
 			test_case_depth = 0;
-			while (repeat-- > 0 && EXIT_SUCCESS != (currtest->run(&result), result))
+			while (iters-- > 0 && EXIT_SUCCESS != (currtest->run(&result), result))
 				;
 #endif
-			clock_gettime(CLOCK_MONOTONIC, &ts_end);
+			clock_gettime(CLOCK_MONOTONIC, &ts_test_end);
 
-			tsdiff(&ts_end, &ts_start, &ts_start);
-			*shm_total_ns = tstons(&ts_start);
+			tsdiff(&ts_test_end, &ts_test_start, &ts_test_start);
+			*shm_total_ns = tstons(&ts_test_start);
 
 #ifndef TEST_NOFORK
 			exit(EXIT_SUCCESS);
 #else
 			dup2(oldstderr, STDERR_FILENO);
+# ifdef TEST_OUTPUT_HUMAN
 			dup2(oldstdout, STDOUT_FILENO);
+# endif
 
 			if (EXIT_SUCCESS == result)
 				goto test_passed;
@@ -268,23 +418,29 @@ int main(int argc, char **argv) {
 		}
 		default: {
 			int stat_val;
-			/* Wait test to finish. */
+			/* Wait test to finish */
 			wait(&stat_val);
 			/* Exited normally. */
 			if (WIFEXITED(stat_val)) {
 				switch (WEXITSTATUS(stat_val)) {
 				case EXIT_SUCCESS: {
-					char info[50];
+					char info[66];
 
+#ifdef TEST_NOFORK
 				test_passed:
+#endif
 					if (-1 == *shm_total_ns) {
+#ifdef TEST_OUTPUT_HUMAN
 						fprintf(stdout, ANSI_RED ANSI_BOLD "EARLY" ANSI_RESET "\n");
 						goto test_fail_action;
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+						goto test_failed;
+#endif
 					}
 
 					currtest->total_ns = *shm_total_ns;
 
-					if (currtest->repeat <= 1)
+					if (currtest->iters == 1)
 						sprintf(info, "%4lu %s",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns));
@@ -292,30 +448,84 @@ int main(int argc, char **argv) {
 						sprintf(info, "%4lu %s / %9lu iters = %4lu %s/iter",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns),
-							currtest->repeat,
-							nstohtime((currtest->total_ns + currtest->repeat - 1) / currtest->repeat),
-							nstohunit((currtest->total_ns + currtest->repeat - 1) / currtest->repeat));
+							currtest->iters,
+							nstohtime((currtest->total_ns + currtest->iters - 1) / currtest->iters),
+							nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
 
 					++stat[test_passed];
+#ifdef TEST_OUTPUT_HUMAN
 					fprintf(stdout, ANSI_GREEN ANSI_BOLD "ok" ANSI_RESET ", %s\n", info);
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+					{
+						char *path FREE = strdup(currtest->file);
+						char *dname FREE = xmlesc(dirname(path));
+						char *bname FREE = xmlesc(basename(path));
+						char *escdesc FREE = xmlesc(currtest->desc);
+						fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+							"success", dname, bname, currtest->line,
+							escdesc,
+							currtest->iters - 1l,
+							(float)currtest->total_ns / SEC_NS,
+							"Core", "Passed");
+					}
+#endif
 					goto drop_output;
 				}
 				case 77: /* Special exit code. */
 					goto test_skip;
 				default: /* Others. */
-				test_failed:
+#ifdef TEST_OUTPUT_HUMAN
 					fprintf(stdout, ANSI_RED ANSI_BOLD "FAILED" ANSI_RESET "\n");
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+				test_failed:
+					{
+						char *path FREE = strdup(currtest->file);
+						char *dname FREE = xmlesc(dirname(path));
+						char *bname FREE = xmlesc(basename(path));
+						char *escerr FREE = NULL;
+						off_t errlen;
+
+						write(currtest->outfd, "\0", sizeof(char));
+						errlen = lseek(currtest->outfd, 0, SEEK_CUR);
+						if (errlen > 1) {
+							char *errtext = mmap(NULL, errlen * sizeof(char),
+									PROT_READ, MAP_SHARED,
+									currtest->outfd, 0);
+							escerr = xmlesc(errtext);
+							munmap(errtext, errlen * sizeof(char));
+						}
+
+						fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+							"failure", dname, bname, currtest->line,
+							currtest->desc, -1l, -1.0,
+							"Core", escerr ? escerr : "Failure");
+					}
+#endif
 					goto test_fail_action;
 				}
 			} else {
+#ifdef TEST_OUTPUT_HUMAN
 				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG(%02u)" ANSI_RESET "\n",
 					WTERMSIG(stat_val));
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+				{
+					char *path FREE = strdup(currtest->file);
+					char *dname FREE = xmlesc(dirname(path));
+					char *bname FREE = xmlesc(basename(path));
+					char *escdesc FREE = xmlesc(currtest->desc);
+					fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+						"failure", dname, bname, currtest->line,
+						escdesc, -1l, -1.0,
+						"Core", strsignal(WTERMSIG(stat_val)));
+				}
+#endif
 			test_fail_action:
 				++stat[test_failed];
+
 #ifdef TEST_NOGATHEROUTPUT
 				cat(currtest->outfd);
-#else
-				continue; /* Keep output. */
+#elif defined(TEST_OUTPUT_HUMAN)
+				goto next_test; /* Keep output. */
 #endif
 			}
 		}
@@ -324,12 +534,24 @@ int main(int argc, char **argv) {
 	drop_output:
 		close(currtest->outfd);
 		currtest->outfd = -1;
+	next_test:
+		if (currsuite) {
+			if (0 == currsuite->line) {
+#ifdef TEST_OUTPUT_LIBCHECKXML
+				fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_SUITE_END);
+#endif
+			} else {
+				--currsuite->line;
+			}
+		}
 	}
 
 	munmap(shm_total_ns, sizeof(*shm_total_ns));
 
 #ifndef TEST_NOGATHEROUTPUT
+# ifdef TEST_OUTPUT_HUMAN
 	print_hline(width, '=');
+# endif
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
 		if (-1 == currtest->outfd)
 			continue;
@@ -344,6 +566,10 @@ int main(int argc, char **argv) {
 	}
 #endif
 
+	clock_gettime(CLOCK_MONOTONIC, &ts_end);
+	tsdiff(&ts_end, &ts_start, &ts_start);
+
+#ifdef TEST_OUTPUT_HUMAN
 	if (gathered)
 		print_hline(width, '=');
 	fprintf(stdout,
@@ -355,6 +581,10 @@ int main(int argc, char **argv) {
 		stat[test_passed],
 		stat[test_failed],
 		stat[test_skipped]);
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+	fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_END,
+		(float)tstons(&ts_start) / SEC_NS);
+#endif
 
 #ifndef TEST_NOLIBSEGFAULT
 	dlclose(dlhandle);
