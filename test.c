@@ -15,6 +15,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #define _GNU_SOURCE
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _SVID_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
 # include <dlfcn.h> /* dlopen */
 #endif
@@ -24,20 +27,22 @@
 #include <sys/mman.h> /* memfd_create */
 #include <time.h> /* clock_gettime */
 
+#include <stdio.h>
+
 #include "test.h"
 
 #ifdef TEST_OUTPUT_LIBCHECKXML
 # include <libgen.h> /* dirname, basename */
-# define FORMAT_LIBCHECK_TEMPLATE_START \
+# define OUTPUT_LIBCHECK_TEMPLATE_START \
 	"<?xml version=\"1.0\"?>\n" \
 	"<?xml-stylesheet type=\"text/xsl\"" \
 	" href=\"http://check.sourceforge.net/xml/check_unittest.xslt\"?>\n" \
 	"<testsuites xmlns=\"http://check.sourceforge.net/ns\">\n" \
 	"  <datetime>%s</datetime>\n",
-# define FORMAT_LIBCHECK_TEMPLATE_SUITE_START \
+# define OUTPUT_LIBCHECK_TEMPLATE_SUITE_START \
 	"  <suite>\n" \
 	"    <title>%s<title>\n"
-# define FORMAT_LIBCHECK_TEMPLATE_TEST \
+# define OUTPUT_LIBCHECK_TEMPLATE_TEST \
 	"    <test result=\"%s\">\n" \
 	"      <path>%s</path>\n" \
 	"      <fn>%s:%u</fn>\n" \
@@ -47,12 +52,15 @@
 	"      <description>%s</description>\n" \
 	"      <message>%s</message>\n" \
 	"    </test>\n"
-# define FORMAT_LIBCHECK_TEMPLATE_SUITE_END \
+# define OUTPUT_LIBCHECK_TEMPLATE_SUITE_END \
 	"  </suite>\n"
-# define FORMAT_LIBCHECK_TEMPLATE_END \
+# define OUTPUT_LIBCHECK_TEMPLATE_END \
 	"  <duration>%.6f</duration>\n" \
 	"</testsuites>\n"
 #endif
+
+#define OUTPUT_HUMAN_SUITE_MINLEN (5 + 4)
+#define OUTPUT_HUMAN_TEST_MINLEN (5 + 5 + 11)
 
 #define FREE __attribute__((cleanup(varfree)))
 #define CONST __attribute__((const))
@@ -141,24 +149,6 @@ void print_hline(int n, char ch) {
 }
 #endif
 
-/** Default signal handler. */
-static
-void sighandler(int sig, siginfo_t *info, void *ucontext)
-{
-	void *array[50];
-	int size;
-
-	fprintf(stderr, "*** %s, address is %p\n\n",
-		strsignal(sig), info->si_addr);
-
-	size = backtrace(array, 50);
-
-	fprintf(stderr, "Backtrace:\n");
-	backtrace_symbols_fd(array, size, STDERR_FILENO);
-
-	exit(EXIT_FAILURE);
-}
-
 #if TEST_OUTPUT_XML
 /** XML escape `text`. */
 static
@@ -214,6 +204,78 @@ end_loop:
 }
 #endif
 
+UNUSED static
+char signame[NSIG][7];
+
+/** Default signal handler. */
+static
+void sighandler(int sig, siginfo_t *info, void *ucontext) {
+	void *array[50];
+	int size;
+
+	psiginfo(info, "Unhandled signal");
+
+	size = backtrace(array, 50);
+
+	fprintf(stderr, "\nBacktrace:\n");
+	backtrace_symbols_fd(array, size, STDERR_FILENO);
+
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+/** Initialize signal handling. */
+static
+void sighandler_init(void) {
+	int sig;
+
+	static struct sigaction sa;
+	sa.sa_sigaction = sighandler;
+	sa.sa_flags = SA_RESTART | SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+
+	/* Use pretty signal names if action is Core, Stop or Term and then attach
+	 * a signal handler for it. Otherwise just use its number. */
+
+#define D(name) \
+    strncpy(signame[SIG##name], #name, sizeof(*signame));
+	
+	D(ABRT  )
+	D(ALRM  )
+	D(BUS   )
+	D(FPE   )
+	D(HUP   )
+	D(ILL   )
+	D(INT   )
+	D(KILL  )
+	D(PIPE  )
+	D(POLL  )
+	D(PROF  )
+	D(QUIT  )
+	D(SEGV  )
+	D(STOP  )
+	D(TSTP  )
+	D(SYS   )
+	D(TERM  )
+	D(TRAP  )
+	D(TTIN  )
+	D(TTOU  )
+	D(USR1  )
+	D(USR2  )
+	D(VTALRM)
+	D(XCPU  )
+	D(XFSZ  )
+
+#undef D
+
+	for (sig = 1; sig < NSIG; ++sig) {
+		if (signame[sig][0])
+			sigaction(sig, &sa, NULL);
+		else
+			snprintf((char*)(signame + sig), sizeof(*signame), "(%02d)", sig);
+	}
+}
+
 int main(int argc, char **argv) {
 
 	enum { test_suite, test_total, test_passed, test_failed, test_skipped, test_result_count };
@@ -229,14 +291,7 @@ int main(int argc, char **argv) {
 #endif
 	struct test_test_info *currsuite = NULL; /** Active suite. */
 
-	struct sigaction sa;
-	sa.sa_sigaction = sighandler;
-	sa.sa_flags = SA_RESTART | SA_SIGINFO;
-
-	if (sigaction(SIGSEGV, &sa, NULL)) {
-		perror("sigaction");
-		exit(EXIT_FAILURE);
-	}
+	sighandler_init();
 
 #ifndef TEST_NOLIBSEGFAULT
 	dlhandle = dlopen("/lib/libSegFault.so", RTLD_LAZY);
@@ -264,7 +319,7 @@ int main(int argc, char **argv) {
 			if (!currtest->desc)
 				continue;
 
-			len = strlen(currtest->desc) + 17;
+			len = strlen(currtest->desc) + OUTPUT_HUMAN_TEST_MINLEN;
 			if (len > width)
 				width = len;
 
@@ -272,7 +327,7 @@ int main(int argc, char **argv) {
 			currsuite = currtest;
 			++stat[test_suite];
 
-			len = 5 + strlen(currtest->desc) + strlen(currtest->file) + 4;
+			len = strlen(currtest->desc) + strlen(currtest->file) + OUTPUT_HUMAN_SUITE_MINLEN;
 			if (len > width)
 				width = len;
 		}
@@ -295,7 +350,7 @@ int main(int argc, char **argv) {
 		}
 
 		strftime(datetime, sizeof(datetime), "%Y-%m-%d %T", localnow);
-		fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_START
+		fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_START
 			datetime);
 	}
 #endif
@@ -321,7 +376,7 @@ int main(int argc, char **argv) {
 				currtest->desc, currtest->file);
 			print_hline(width, '-');
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
-			fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_SUITE_START,
+			fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_START,
 				currtest->desc);
 #endif
 			goto next_test;
@@ -330,7 +385,7 @@ int main(int argc, char **argv) {
 #ifdef TEST_OUTPUT_HUMAN
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
 			currtest->desc,
-			width - 17 - (int)strlen(currtest->desc), "");
+			width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->desc), "");
 		fflush(stdout);
 #endif
 
@@ -433,7 +488,7 @@ int main(int argc, char **argv) {
 #endif
 					if (-1 == *shm_total_ns) {
 #ifdef TEST_OUTPUT_HUMAN
-						fprintf(stdout, ANSI_RED ANSI_BOLD "EARLY" ANSI_RESET "\n");
+						fprintf(stdout, ANSI_RED ANSI_BOLD "not ok" ANSI_RESET "\n");
 						goto test_fail_action;
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 						goto test_failed;
@@ -443,11 +498,11 @@ int main(int argc, char **argv) {
 					currtest->total_ns = *shm_total_ns;
 
 					if (currtest->iters == 1)
-						sprintf(info, "%4lu %s",
+						snprintf(info, sizeof(info), "%4lu %s",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns));
 					else
-						sprintf(info, "%4lu %s / %9lu iters = %4lu %s/iter",
+						snprintf(info, sizeof(info), "%4lu %s / %9lu iters = %4lu %s/iter",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns),
 							currtest->iters,
@@ -463,7 +518,7 @@ int main(int argc, char **argv) {
 						char *dname FREE = xmlesc(dirname(path));
 						char *bname FREE = xmlesc(basename(path));
 						char *escdesc FREE = xmlesc(currtest->desc);
-						fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+						fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
 							"success", dname, bname, currtest->line,
 							escdesc,
 							currtest->iters - 1l,
@@ -497,7 +552,7 @@ int main(int argc, char **argv) {
 							munmap(errtext, errlen * sizeof(char));
 						}
 
-						fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+						fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
 							"failure", dname, bname, currtest->line,
 							currtest->desc, -1l, -1.0,
 							"Core", escerr ? escerr : "Failure");
@@ -507,15 +562,16 @@ int main(int argc, char **argv) {
 				}
 			} else {
 #ifdef TEST_OUTPUT_HUMAN
-				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG(%02u)" ANSI_RESET "\n",
-					WTERMSIG(stat_val));
+
+				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG%s" ANSI_RESET "\n",
+					signame[WTERMSIG(stat_val)]);
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 				{
 					char *path FREE = strdup(currtest->file);
 					char *dname FREE = xmlesc(dirname(path));
 					char *bname FREE = xmlesc(basename(path));
 					char *escdesc FREE = xmlesc(currtest->desc);
-					fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_TEST,
+					fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
 						"failure", dname, bname, currtest->line,
 						escdesc, -1l, -1.0,
 						"Core", strsignal(WTERMSIG(stat_val)));
@@ -540,7 +596,7 @@ int main(int argc, char **argv) {
 		if (currsuite) {
 			if (0 == currsuite->line) {
 #ifdef TEST_OUTPUT_LIBCHECKXML
-				fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_SUITE_END);
+				fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_END);
 #endif
 			} else {
 				--currsuite->line;
@@ -584,7 +640,7 @@ int main(int argc, char **argv) {
 		stat[test_failed],
 		stat[test_skipped]);
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
-	fprintf(stdout, FORMAT_LIBCHECK_TEMPLATE_END,
+	fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_END,
 		(float)tstons(&ts_start) / SEC_NS);
 #endif
 
