@@ -16,8 +16,6 @@
  */
 #define _GNU_SOURCE
 #define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#define _SVID_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
 # include <dlfcn.h> /* dlopen */
 #endif
@@ -240,31 +238,11 @@ void sighandler_init(void) {
 #define D(name) \
     strncpy(signame[SIG##name], #name, sizeof(*signame));
 	
-	D(ABRT  )
-	D(ALRM  )
-	D(BUS   )
-	D(FPE   )
-	D(HUP   )
-	D(ILL   )
-	D(INT   )
-	D(KILL  )
-	D(PIPE  )
-	D(POLL  )
-	D(PROF  )
-	D(QUIT  )
-	D(SEGV  )
-	D(STOP  )
-	D(TSTP  )
-	D(SYS   )
-	D(TERM  )
-	D(TRAP  )
-	D(TTIN  )
-	D(TTOU  )
-	D(USR1  )
-	D(USR2  )
-	D(VTALRM)
-	D(XCPU  )
-	D(XFSZ  )
+	D(ABRT  ) D(ALRM  ) D(BUS   ) D(FPE   ) D(HUP   )
+	D(ILL   ) D(INT   ) D(KILL  ) D(PIPE  ) D(POLL  )
+	D(PROF  ) D(QUIT  ) D(SEGV  ) D(STOP  ) D(TSTP  )
+	D(SYS   ) D(TERM  ) D(TRAP  ) D(TTIN  ) D(TTOU  )
+	D(USR1  ) D(USR2  ) D(VTALRM) D(XCPU  ) D(XFSZ  )
 
 #undef D
 
