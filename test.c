@@ -235,16 +235,16 @@ void sighandler_init(void) {
 	/* Use pretty signal names if action is Core, Stop or Term and then attach
 	 * a signal handler for it. Otherwise just use its number. */
 
-#define D(name) \
+#define SIG(name) \
     strncpy(signame[SIG##name], #name, sizeof(*signame));
 	
-	D(ABRT  ) D(ALRM  ) D(BUS   ) D(FPE   ) D(HUP   )
-	D(ILL   ) D(INT   ) D(KILL  ) D(PIPE  ) D(POLL  )
-	D(PROF  ) D(QUIT  ) D(SEGV  ) D(STOP  ) D(TSTP  )
-	D(SYS   ) D(TERM  ) D(TRAP  ) D(TTIN  ) D(TTOU  )
-	D(USR1  ) D(USR2  ) D(VTALRM) D(XCPU  ) D(XFSZ  )
+	SIG(ABRT  ) SIG(ALRM  ) SIG(BUS   ) SIG(FPE   ) SIG(HUP   )
+	SIG(ILL   ) SIG(INT   ) SIG(KILL  ) SIG(PIPE  ) SIG(POLL  )
+	SIG(PROF  ) SIG(QUIT  ) SIG(SEGV  ) SIG(STOP  ) SIG(TSTP  )
+	SIG(SYS   ) SIG(TERM  ) SIS(TRAP  ) SIG(TTIN  ) SIG(TTOU  )
+	SIG(USR1  ) SIG(USR2  ) SIG(VTALRM) SIG(XCPU  ) SIG(XFSZ  )
 
-#undef D
+#undef SIG
 
 	for (sig = 1; sig < NSIG; ++sig) {
 		if (signame[sig][0])
