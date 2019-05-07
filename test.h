@@ -199,6 +199,8 @@ extern struct test_test_info *currsuite;
 #define SUITE_(desc) \
 	TEST_VAR_(unit) = {NULL, desc, __FILE__, 0, 0, -1};
 
+enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, test_hook_teardown_test };
+
 #define HOOK_SUITE_ HOOK__SCOPE__(1)
 #define HOOK_GLOBAL_ HOOK__SCOPE__(2)
 
@@ -206,26 +208,30 @@ extern struct test_test_info *currsuite;
 	TOKENPASTE3(HOOK_, scope, _)
 
 #define SETUP() \
-	static int test_setup_happened_ = 0; \
-	static void test_setup(); \
-	HOOK(SUITE) { \
-		if (!test_setup_happened_) { \
-			test_setup_happened_ = 1; \
+	static void test_setup(void); \
+	HOOK(SUITE) \
+	{ \
+		if (test_hook_setup_suite == event) \
 			test_setup(); \
-		} \
 	} \
-	static void test_setup()
+	static void test_setup(void)
 
 #define TEARDOWN() \
-	static void test_teardown()
+	static void test_teardown(void); \
+	HOOK(SUITE) \
+	{ \
+		if (test_hook_teardown_suite == event) \
+			test_teardown(); \
+	} \
+	static void test_teardown(void)
 
 #define HOOK__SCOPE__(scope) \
 	HOOK__SCOPE___(scope, TOKENPASTE(test_hook_at_line_, __LINE__))
 
 #define HOOK__SCOPE___(scope, name) \
-	static void name(); \
+	static void name(int); \
 	TEST_VAR_(name) = {name, NULL, NULL, scope, 0, -1}; \
-	static void name()
+	static void name(int event)
 
 #define STRINGIFY(t) #t
 #define TOKENPASTE_(a, b) a##b

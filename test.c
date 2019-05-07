@@ -256,7 +256,7 @@ void sighandler_init(void) {
 }
 
 static
-void fire_hooks(int arg) {
+void fire_event(int event) {
 	struct test_test_info *tti;
 
 	for (tti = &__start_test;tti < currtest;++tti) {
@@ -267,7 +267,7 @@ void fire_hooks(int arg) {
 
 		if (2/*global*/ == scope ||
 		   (1/*suite */ == scope && tti > currsuite))
-			((void(*)(int hook_runs_before))tti->run)(arg);
+			((void(*)(int))tti->run)(event); /* TODO: Make an union. */
 	}
 }
 
@@ -378,6 +378,7 @@ int main(int argc, char **argv) {
 			fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_START,
 				currtest->desc);
 #endif
+			fire_event(test_hook_setup_suite);
 			goto next_test;
 		}
 
@@ -429,7 +430,7 @@ int main(int argc, char **argv) {
 
 		*shm_total_ns = -1;
 
-		fire_hooks(1);
+		fire_event(test_hook_setup_test);
 
 		switch (TEST_FORK_IMPL_) {
 		case -1:
@@ -595,7 +596,7 @@ int main(int argc, char **argv) {
 		}
 		}
 
-		fire_hooks(0);
+		fire_event(test_hook_teardown_test);
 
 	drop_output:
 		close(currtest->outfd);
@@ -606,6 +607,7 @@ int main(int argc, char **argv) {
 #ifdef TEST_OUTPUT_LIBCHECKXML
 				fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_END);
 #endif
+				fire_event(test_hook_teardown_suite);
 			} else {
 				--currsuite->line;
 			}
