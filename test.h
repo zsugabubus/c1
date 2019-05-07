@@ -230,7 +230,7 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 
 #define HOOK__SCOPE___(scope, name) \
 	static void name(int); \
-	TEST_VAR_(name) = {name, NULL, NULL, scope, 0, -1}; \
+	TEST_VAR_(name) = {(void(*)(void))name, NULL, NULL, scope, 0, -1}; \
 	static void name(int event)
 
 #define STRINGIFY(t) #t
@@ -270,12 +270,12 @@ __builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1
 
 #define assert_msg(c, msg) \
 	if (!(c)) {  \
-		fprintf(stderr, TEST_ASSERT_FORMAT, msg); \
+		fprintf(stderr, TEST_ASSERT_FORMAT, TEST_ASSERT_LOC msg); \
 		FAILURE(EXIT_FAILURE); \
 	}
 
 #define assert(c) \
-	assert_msg(c, TEST_ASSERT_LOC "`" #c "'")
+	assert_msg(c, "`" #c "'")
 
 #define assert_memequal(lhs, rhs, size) \
 	assert(0 == memcmp(lhs, rhs, size));
@@ -291,8 +291,29 @@ __builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1
 	              (0 == strcmp((char *)(size_t)lhs, (char *)(size_t)rhs)), \
 	              (lhs == rhs))
 
+/* I really hope every type is here. */
+union test_converter_any_union {
+	void *ptr;
+	void const *const_ptr;
+	float flt;
+	double dbl;
+	char c;
+	unsigned char uc;
+	short s;
+	unsigned short us;
+	int i;
+	unsigned int ui;
+	long l;
+	unsigned long ul;
+} __attribute__((__transparent_union__));
+
+inline __attribute__((const))
+double test_any2dbl(union test_converter_any_union u) {
+	return u.dbl; /* Awesome... */
+}
+
 #define TEST_TYPEFORPRINT(val) \
-	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), (double)val, val)
+	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), test_any2dbl(val), val)
 
 #define assert_eq assert_equal
 #define assert_lt assert_less
