@@ -69,6 +69,7 @@ extern struct test_test_info __start_test, __stop_test;
 int test_case_depth = 0;
 struct test_case_info test_case_info[7];
 struct test_test_info *currtest;
+struct test_test_info *currsuite;
 
 /* Free variable. */
 UNUSED static
@@ -241,7 +242,7 @@ void sighandler_init(void) {
 	SIG(ABRT  ) SIG(ALRM  ) SIG(BUS   ) SIG(FPE   ) SIG(HUP   )
 	SIG(ILL   ) SIG(INT   ) SIG(KILL  ) SIG(PIPE  ) SIG(POLL  )
 	SIG(PROF  ) SIG(QUIT  ) SIG(SEGV  ) SIG(STOP  ) SIG(TSTP  )
-	SIG(SYS   ) SIG(TERM  ) SIS(TRAP  ) SIG(TTIN  ) SIG(TTOU  )
+	SIG(SYS   ) SIG(TERM  ) SIG(TRAP  ) SIG(TTIN  ) SIG(TTOU  )
 	SIG(USR1  ) SIG(USR2  ) SIG(VTALRM) SIG(XCPU  ) SIG(XFSZ  )
 
 #undef SIG
@@ -251,6 +252,22 @@ void sighandler_init(void) {
 			sigaction(sig, &sa, NULL);
 		else
 			snprintf((char*)(signame + sig), sizeof(*signame), "(%02d)", sig);
+	}
+}
+
+static
+void fire_hooks(int arg) {
+	struct test_test_info *tti;
+
+	for (tti = &__start_test;tti < currtest;++tti) {
+		unsigned const scope = tti->line;
+
+		if (tti->file)
+			continue;
+
+		if (2/*global*/ == scope ||
+		   (1/*suite */ == scope && tti > currsuite))
+			((void(*)(int hook_runs_before))tti->run)(arg);
 	}
 }
 
@@ -267,7 +284,6 @@ int main(int argc, char **argv) {
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle; /* Handle fo libSegFault */
 #endif
-	struct test_test_info *currsuite = NULL; /** Active suite. */
 
 	sighandler_init();
 
@@ -286,8 +302,12 @@ int main(int argc, char **argv) {
 	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
 		int len;
 		
-		/* Too lazy to make another struct for suites. */
+		/* One struct is enough for everything. */
 		if (currtest->run) {
+			if (!currtest->file)
+				/* Runnable. */
+				continue;
+
 			++stat[test_total];
 
 			/* Count tests in suites. */
@@ -348,6 +368,7 @@ int main(int argc, char **argv) {
 		int skip;
 
 		if (!currtest->run) {
+			/* Suite start marker. */
 			currsuite = currtest;
 #ifdef TEST_OUTPUT_HUMAN
 			fprintf(stdout, "\nsuite " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
@@ -359,6 +380,10 @@ int main(int argc, char **argv) {
 #endif
 			goto next_test;
 		}
+
+		if (!currtest->file)
+			/* Runnable. */
+			continue;
 
 #ifdef TEST_OUTPUT_HUMAN
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
@@ -403,6 +428,9 @@ int main(int argc, char **argv) {
 		}
 
 		*shm_total_ns = -1;
+
+		fire_hooks(1);
+
 		switch (TEST_FORK_IMPL_) {
 		case -1:
 			perror("fork");
@@ -566,6 +594,8 @@ int main(int argc, char **argv) {
 			}
 		}
 		}
+
+		fire_hooks(0);
 
 	drop_output:
 		close(currtest->outfd);

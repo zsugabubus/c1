@@ -23,6 +23,7 @@
 #include <string.h> /* strcmp, memcmp */
 #include <sys/wait.h> /* wait */
 #include <unistd.h> /* fork, dup2 */
+#include <stdint.h> /* size_t */
 
 #ifndef TEST_CASESEP
 # define TEST_CASESEP " / "
@@ -83,6 +84,7 @@ struct test_case_info {
 extern int test_case_depth;
 extern struct test_case_info test_case_info[7];
 extern struct test_test_info *currtest;
+extern struct test_test_info *currsuite;
 
 /* Default XML output. */
 #ifdef TEST_OUTPUT_XML
@@ -95,31 +97,50 @@ extern struct test_test_info *currtest;
 # define TEST_OUTPUT_HUMAN
 #endif
 
-#define BENCH(name, repeat) \
-	BENCH_(void, name, #name, repeat)
-
-#define BENCHND(name, desc, repeat) \
-	BENCH_(void, name, desc, repeat)
-
-/* Must be static, because we can't generate unique names. */
-#define BENCHD(desc, repeat) \
-	BENCH_(static void, TOKENPASTE(test_at_line_, __LINE__), desc, repeat)
-
-/* Test is just a bench that runs once. */
-#define TEST(name) \
-	BENCH(name, 1)
-
-#define TESTD(desc) \
-	BENCHD(desc, 1)
-
-#define TESTND(name, desc) \
-	BENCHD(name, desc, 1)
-
-/* Have to hack with rtype, because empty macro argument is not valid. */
-#define BENCH_(static_rtype, name, desc, repeat) \
+#define BENCHIFND_(static_rtype, name, desc, repeat) \
 	static_rtype name(TEST_PARAM_); \
 	TEST_VAR_(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
 	static_rtype name(TEST_PARAM_)
+
+/* Mothers of everything. */
+#define BENCHIFND(name, desc, repeat, cond) \
+	BENCHIFND_(void, name, desc, !!(cond) * repeat)
+
+#define BENCHND(name, desc, repeat) \
+	BENCHIFND(name, desc, repeat, 1)
+
+#define TESTIFND(name, desc, cond) \
+	BENCHIFND(name, desc, 1, cond)
+
+#define TESTND(name, desc, cond) \
+	TESTIFND(name, desc, cond)
+
+/* Must be static, because we can't generate unique names. */
+#define BENCHIFD(desc, repeat, cond) \
+	BENCHIFND_(static void, TOKENPASTE(test_at_line_, __LINE__), desc, !!(cond) * repeat)
+
+#define BENCHD(desc, repeat) \
+	BENCHIFD(desc, repeat, 1)
+
+#define TESTIFD(desc, cond) \
+	BENCHIFD(desc, 1, cond)
+
+#define TESTD(desc) \
+	TESTIFD(desc, 1)
+
+#define BENCHIF(name, repeat, cond) \
+	BENCHIFND(name, #name, repeat, cond)
+
+#define BENCH(name, repeat) \
+	BENCHIF(name, repeat, 1)
+
+#define TESTIF(name, cond) \
+	BENCHIF(name, 1, cond)
+
+#define TEST(name) \
+	TESTIF(name, 1)
+
+/* Have to hack with rtype, because empty macro argument is not valid. */
 
 #define CASE(name) \
 	CASED(#name)
@@ -178,20 +199,68 @@ extern struct test_test_info *currtest;
 #define SUITE_(desc) \
 	TEST_VAR_(unit) = {NULL, desc, __FILE__, 0, 0, -1};
 
+#define HOOK_SUITE_ HOOK__SCOPE__(1)
+#define HOOK_GLOBAL_ HOOK__SCOPE__(2)
+
+#define HOOK(scope) \
+	TOKENPASTE3(HOOK_, scope, _)
+
+#define SETUP() \
+	static int test_setup_happened_ = 0; \
+	static void test_setup(); \
+	HOOK(SUITE) { \
+		if (!test_setup_happened_) { \
+			test_setup_happened_ = 1; \
+			test_setup(); \
+		} \
+	} \
+	static void test_setup()
+
+#define TEARDOWN() \
+	static void test_teardown()
+
+#define HOOK__SCOPE__(scope) \
+	HOOK__SCOPE___(scope, TOKENPASTE(test_hook_at_line_, __LINE__))
+
+#define HOOK__SCOPE___(scope, name) \
+	static void name(); \
+	TEST_VAR_(name) = {name, NULL, NULL, scope, 0, -1}; \
+	static void name()
+
+#define STRINGIFY(t) #t
 #define TOKENPASTE_(a, b) a##b
+#define TOKENPASTE3_(a, b, c) a##b##c
 #define TOKENPASTE(a, b) TOKENPASTE_(a, b)
+#define TOKENPASTE3(a, b, c) TOKENPASTE3_(a, b, c)
 
 #ifdef TEST_OUTPUT_HUMAN
-# define TEST_ASSERT_FORMAT \
-	"%s:%u: " ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed.\n", __FILE__, __LINE__
-# define TEST_EXPECT_FORMAT(fmt) \
-	"%s:%u: " ANSI_RED ANSI_BOLD "Expected" ANSI_RESET " " fmt ", got " fmt ".\n", __FILE__, __LINE__
+# define TEST_ASSERT_LOC __FILE__, __LINE__,
+# define TEST_ASSERT_LOCFMT "%s:%u: "
 #else
-# define TEST_ASSERT_FORMAT \
-	"Assertion %s failed"
-# define TEST_EXPECT_FORMAT(fmt) \
-	"Expected " fmt ", got " fmt
+# define TEST_ASSERT_LOC
+# define TEST_ASSERT_LOCFMT
 #endif
+
+#define TEST_ASSERT_FORMAT \
+	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed.\n"
+#define TEST_ASSERT_FORMAT_CMPTWO(fmt) \
+	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed; left=" fmt ", right=" fmt ".\n"
+#define TEST_ASSERT_FORMAT_CMPONE(fmt) \
+	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed; got " fmt ".\n"
+
+#define TEST_ASSERT_FORMAT_CMPSEL(lhs, rhs) \
+__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
+		TEST_ASSERT_FORMAT_CMPSEL_GEN_(__typeof__(rhs), ONE), \
+		TEST_ASSERT_FORMAT_CMPSEL_GEN_(__typeof__(rhs), TWO))
+
+#define TEST_ASSERT_FORMAT_CMPSEL_GEN_(type, kind) \
+	TEST_CHOEXPR_(TEST_ISTYPE_(type, char *) || TEST_ISTYPE_(type, char[]), \
+	              TEST_ASSERT_FORMAT_CMP##kind("\"%s\""), \
+	TEST_CHOEXPR_(__builtin_types_compatible_p(type, char), \
+	              TEST_ASSERT_FORMAT_CMP##kind("'%c'"), \
+	TEST_CHOEXPR_(__builtin_types_compatible_p(type, double), \
+	              TEST_ASSERT_FORMAT_CMP##kind("%f"), \
+	              TEST_ASSERT_FORMAT_CMP##kind("%d"))))
 
 #define assert_msg(c, msg) \
 	if (!(c)) {  \
@@ -200,35 +269,44 @@ extern struct test_test_info *currtest;
 	}
 
 #define assert(c) \
-	assert_msg(c, "`" #c "'")
+	assert_msg(c, TEST_ASSERT_LOC "`" #c "'")
 
-#define assert_eq(lhs, rhs) \
-	assert(lhs == rhs);
-
-#define assert_streq(lhs, rhs) \
-	assert(0 == strcmp(lhs, rhs));
-
-#define assert_memeq(lhs, rhs, size) \
+#define assert_memequal(lhs, rhs, size) \
 	assert(0 == memcmp(lhs, rhs, size));
 
-#define expect_msg(exp, act, type, cmp, fmt) \
+#define TEST_ISTYPE_(val, type) \
+	__builtin_types_compatible_p(__typeof__(val), type)
+
+#define TEST_CHOEXPR_(cond, thenexpr, elseexpr) \
+	__builtin_choose_expr(cond, thenexpr, elseexpr)
+
+#define assert_cmp_(lhs, rhs) \
+	TEST_CHOEXPR_(TEST_ISTYPE_(lhs, char *) || TEST_ISTYPE_(lhs, char[]), \
+	              (0 == strcmp((char *)(size_t)lhs, (char *)(size_t)rhs)), \
+	              (lhs == rhs))
+
+#define TEST_TYPEFORPRINT(val) \
+	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), (double)val, val)
+
+#define assert_eq assert_equal
+#define assert_lt assert_less
+#define assert_gt assert_less
+
+#define static_assert(cond, msg) typedef char _test_static_assert_lhs_and_rhs_differ_in_type[cond - 1];
+
+#define assert_equal(lhs, rhs) \
 do { \
-	type const EXP = (exp); \
-	type const ACT = (act); \
-	if (!(cmp)) {  \
-		fprintf(stderr, TEST_EXPECT_FORMAT(fmt), EXP, ACT); \
+	__typeof__(lhs) const lhsv = (lhs); \
+	__typeof__(rhs) const rhsv = (rhs); \
+	if (!assert_cmp_(lhsv, rhsv)) { \
+		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL(lhs, rhs), \
+			TEST_ASSERT_LOC \
+			STRINGIFY(lhs == rhs), \
+			__builtin_choose_expr(__builtin_constant_p(rhs) || !__builtin_constant_p(lhs), TEST_TYPEFORPRINT(lhsv), TEST_TYPEFORPRINT(rhsv)), \
+			TEST_TYPEFORPRINT(rhsv)), \
 		FAILURE(EXIT_FAILURE); \
 	} \
 } while (0);
-
-#define expect_int(exp, act) \
-	expect_msg(exp, act, long int const, (EXP == ACT), "%ld")
-
-#define expect_uint(exp, act) \
-	expect_msg(exp, act, long unsigned const, (EXP == ACT), "%lu")
-
-#define expect_str(exp, act) \
-	expect_msg(exp, act, char const*, (0 == strcmp(EXP, ACT)), "`%s'")
 
 #endif /* TEST_H */
 /* vim:set ft=c ts=4 sw=4 noet: */
