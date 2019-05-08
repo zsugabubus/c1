@@ -254,26 +254,23 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 #define TEST_ASSERT_FORMAT_CMPONE(fmt) \
 	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed; got " fmt ".\n"
 
-#define TEST_ASSERT_FORMAT_CMPSEL(lhs, rhs) \
-__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
-		TEST_ASSERT_FORMAT_CMPSEL_GEN_(__typeof__(rhs), ONE), \
-		TEST_ASSERT_FORMAT_CMPSEL_GEN_(__typeof__(rhs), TWO))
-
-#define TEST_ASSERT_FORMAT_CMPSEL_GEN_(type, kind) \
+#define TEST_ASSERT_FORMAT_CMPSEL_(type, kind) \
 	TEST_CHOEXPR_(TEST_ISTYPE_(type, char *) || TEST_ISTYPE_(type, char[]), \
 	              TEST_ASSERT_FORMAT_CMP##kind("\"%s\""), \
-	TEST_CHOEXPR_(__builtin_types_compatible_p(type, char), \
+	TEST_CHOEXPR_(TEST_ISTYPE_(type, char), \
 	              TEST_ASSERT_FORMAT_CMP##kind("'%c'"), \
-	TEST_CHOEXPR_(__builtin_types_compatible_p(type, double), \
+	TEST_CHOEXPR_(TEST_ISTYPE_(type, double) || TEST_ISTYPE_(type, float), \
 	              TEST_ASSERT_FORMAT_CMP##kind("%f"), \
 	              TEST_ASSERT_FORMAT_CMP##kind("%d"))))
 
 #define assert_msg(c, msg) \
-	if (!(c)) {  \
+	if (!(c)) { \
 		fprintf(stderr, TEST_ASSERT_FORMAT, TEST_ASSERT_LOC msg); \
 		FAILURE(EXIT_FAILURE); \
 	}
 
+/* Shit on stdandard library. */
+#undef assert
 #define assert(c) \
 	assert_msg(c, "`" #c "'")
 
@@ -297,23 +294,27 @@ union test_converter_any_union {
 	void const *const_ptr;
 	float flt;
 	double dbl;
-	char c;
+	signed char c;
 	unsigned char uc;
-	short s;
+	signed short s;
 	unsigned short us;
-	int i;
+	signed int i;
 	unsigned int ui;
-	long l;
+	signed long l;
 	unsigned long ul;
+#if __STDC_VERSION__ > 199901L
+	signed long long ll;
+	unsigned long long ull;
+#endif
 } __attribute__((__transparent_union__));
 
-inline __attribute__((const))
-double test_any2dbl(union test_converter_any_union u) {
-	return u.dbl; /* Awesome... */
+static inline __attribute__((const))
+double test_flt2dbl(union test_converter_any_union u) {
+	return (double)u.flt; /* Awesome... */
 }
 
 #define TEST_TYPEFORPRINT(val) \
-	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), test_any2dbl(val), val)
+	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), test_flt2dbl(val), val)
 
 #define assert_eq assert_equal
 #define assert_lt assert_less
@@ -321,16 +322,22 @@ double test_any2dbl(union test_converter_any_union u) {
 
 #define static_assert(cond, msg) typedef char _test_static_assert_lhs_and_rhs_differ_in_type[cond - 1];
 
+/* _Pragma operator was introduced in C99. */
 #define assert_equal(lhs, rhs) \
 do { \
 	__typeof__(lhs) const lhsv = (lhs); \
 	__typeof__(rhs) const rhsv = (rhs); \
 	if (!assert_cmp_(lhsv, rhsv)) { \
-		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL(lhs, rhs), \
+__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
+		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL_(__typeof__(rhs), ONE), \
 			TEST_ASSERT_LOC \
 			STRINGIFY(lhs == rhs), \
-			__builtin_choose_expr(__builtin_constant_p(rhs) || !__builtin_constant_p(lhs), TEST_TYPEFORPRINT(lhsv), TEST_TYPEFORPRINT(rhsv)), \
-			TEST_TYPEFORPRINT(rhsv)), \
+			__builtin_choose_expr(__builtin_constant_p(rhs), TEST_TYPEFORPRINT(lhsv), TEST_TYPEFORPRINT(rhsv))), \
+		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL_(__typeof__(rhs), TWO), \
+			TEST_ASSERT_LOC \
+			STRINGIFY(lhs == rhs), \
+			TEST_TYPEFORPRINT(lhsv), \
+			TEST_TYPEFORPRINT(rhsv))); \
 		FAILURE(EXIT_FAILURE); \
 	} \
 } while (0);
