@@ -17,16 +17,31 @@
 #ifndef TEST_H
 #define TEST_H
 
+#include <alloca.h> /* alloca */
 #include <fcntl.h> /* O_WRONLY */
+#include <setjmp.h> /* setjmp, longjmp */
+#include <stdint.h> /* size_t */
 #include <stdio.h> /* fprintf, perror */
 #include <stdlib.h> /* exit */
 #include <string.h> /* strcmp, memcmp */
+#include <sys/types.h> /* ftruncate */
 #include <sys/wait.h> /* wait */
-#include <unistd.h> /* fork, dup2 */
-#include <stdint.h> /* size_t */
+#include <unistd.h> /* fork, dup2, ftruncate */
 
-#ifndef TEST_CASESEP
-# define TEST_CASESEP " / "
+#ifndef TEST_CASE_SEPARATOR
+# define TEST_CASE_SEPARATOR " / "
+#endif
+
+#ifndef TEST_TEST_PREFIX
+# define TEST_TEST_PREFIX ""
+#endif
+
+#ifndef TEST_CASE_PREFIX
+# define TEST_CASE_PREFIX ""
+#endif
+
+#ifndef TEST_VERBOSE
+# define TEST_VERBOSE 0
 #endif
 
 #ifndef TEST_NOSTYLES
@@ -49,42 +64,12 @@
 #define ANSI_BLUE ""
 #endif
 
-#ifndef TEST_NOFORK
-# define TEST_PARAM_ void
-# define TEST_FORK_IMPL_ fork()
-# define TEST_CASE_EXIT_IMPL exit(EXIT_SUCCESS)
-# define FAILURE(code) exit((code));
-#else
-# define TEST_PARAM_ int *const _test_result
-# define TEST_FORK_IMPL_ 0
-# define TEST_CASE_EXIT_IMPL ftruncate(currtest->outfd, test_case_info[--test_case_depth].outpos)
-# define FAILURE(code) do { *_test_result = (code); return; } while (0);
-#endif
+#define EXIT_SKIP 77
+#define EXIT_NONFATAL_FAILURE 123
 
-/** Info about tests and suites. */
-struct test_test_info {
-	void(*const run)(TEST_PARAM_)  __attribute__((aligned(16)));
-	char const *const desc;
-	char const *const file;
-	unsigned line;
-	unsigned long const iters;
-	int outfd;
-	unsigned long total_ns;
-	char a[4];
-};
-
-/** Info about test case. */
-struct test_case_info {
-	char const *name;
-	char const *file;
-	unsigned line;
-	off_t outpos;
-};
-
-extern int test_case_depth;
-extern struct test_case_info test_case_info[7];
+extern struct test_suite_info *currsuite;
 extern struct test_test_info *currtest;
-extern struct test_test_info *currsuite;
+extern struct test_case_info *currcase;
 
 /* Default XML output. */
 #ifdef TEST_OUTPUT_XML
@@ -97,109 +82,128 @@ extern struct test_test_info *currsuite;
 # define TEST_OUTPUT_HUMAN
 #endif
 
-#define BENCHIFND_(static_rtype, name, desc, repeat) \
-	static_rtype name(TEST_PARAM_); \
-	TEST_VAR_(name) = {name, desc, __FILE__, __LINE__, repeat, -1}; \
-	static_rtype name(TEST_PARAM_)
+#define BENCHIFND_(static_rtype, id, name, repeat) \
+	static_rtype id(void); \
+	TEST_VAR_(test, id) = {{test_object_id_test}, name, __FILE__, __LINE__, id, repeat, -1, 0, EXIT_SUCCESS}; \
+	static_rtype id(void)
 
 /* Mothers of everything. */
-#define BENCHIFND(name, desc, repeat, cond) \
-	BENCHIFND_(void, name, desc, !!(cond) * repeat)
+#define BENCHIFND(id, name, repeat, cond) \
+	BENCHIFND_(void, id, name, !!(cond) * repeat)
 
-#define BENCHND(name, desc, repeat) \
-	BENCHIFND(name, desc, repeat, 1)
+#define BENCHND(id, name, repeat) \
+	BENCHIFND(id, name, repeat, 1)
 
-#define TESTIFND(name, desc, cond) \
-	BENCHIFND(name, desc, 1, cond)
+#define TESTIFND(id, name, cond) \
+	BENCHIFND(id, name, 1, cond)
 
-#define TESTND(name, desc, cond) \
-	TESTIFND(name, desc, cond)
+#define TESTND(id, name, cond) \
+	TESTIFND(id, name, cond)
 
 /* Must be static, because we can't generate unique names. */
-#define BENCHIFD(desc, repeat, cond) \
-	BENCHIFND_(static void, TOKENPASTE(test_at_line_, __LINE__), desc, !!(cond) * repeat)
+#define BENCHIFD(name, repeat, cond) \
+	BENCHIFND_(static void, TOKENPASTE(test_at_line_, __LINE__), name, !!(cond) * repeat)
 
-#define BENCHD(desc, repeat) \
-	BENCHIFD(desc, repeat, 1)
+#define BENCHD(name, repeat) \
+	BENCHIFD(name, repeat, 1)
 
-#define TESTIFD(desc, cond) \
-	BENCHIFD(desc, 1, cond)
+#define TESTIFD(name, cond) \
+	BENCHIFD(name, 1, cond)
 
-#define TESTD(desc) \
-	TESTIFD(desc, 1)
+#define TESTD(name) \
+	TESTIFD(name, 1)
 
-#define BENCHIF(name, repeat, cond) \
-	BENCHIFND(name, #name, repeat, cond)
+#define BENCHIF(id, repeat, cond) \
+	BENCHIFND(id, #id, repeat, cond)
 
-#define BENCH(name, repeat) \
-	BENCHIF(name, repeat, 1)
+#define BENCH(id, repeat) \
+	BENCHIF(id, repeat, 1)
 
-#define TESTIF(name, cond) \
-	BENCHIF(name, 1, cond)
+#define TESTIF(id, cond) \
+	BENCHIF(id, 1, cond)
 
-#define TEST(name) \
-	TESTIF(name, 1)
+#define TEST(id) \
+	TESTIF(id, 1)
 
 /* Have to hack with rtype, because empty macro argument is not valid. */
 
-#define CASE(name) \
-	CASED(#name)
+#define CASE(id) \
+	CASED(#id)
 
-#define CASED(case_desc) \
-	assert_msg(test_case_depth < (sizeof(test_case_info) / sizeof(*test_case_info)), "cannot nest more cases"); \
-	test_case_info[test_case_depth].name = (case_desc); \
-	test_case_info[test_case_depth].file = __FILE__; \
-	test_case_info[test_case_depth].line = __LINE__; \
-	test_case_info[test_case_depth].outpos = lseek(currtest->outfd, 0, SEEK_CUR); \
+enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code_nonfatal_failur };
+
+#ifndef TEST_NOFORK
+#define test_fork_(obj) test_fork(&(obj).result)
+#else
+#define test_fork_(obj) setjmp((obj).env)
+#endif
+
+#define CASED(casename) \
+	if (currcase) { \
+		if (!currcase->child) { \
+			currcase->child = alloca(sizeof(struct test_case_info)); \
+			currcase->child->parent = currcase; \
+		} \
+		currcase = currcase->child; \
+	} else { \
+		currcase = alloca(sizeof(struct test_case_info)); \
+		currcase->parent = NULL; \
+	} \
+	currcase->name = (casename); \
+	currcase->file = __FILE__; \
+	currcase->line = __LINE__; \
+	currcase->child = NULL; \
+	currcase->result = EXIT_SUCCESS; \
+	currcase->outlen = lseek(currtest->outfd, 0, SEEK_CUR); \
 \
-	switch (TEST_FORK_IMPL_) { \
-	case -1: \
-		perror("fork"); \
-		exit(EXIT_FAILURE); \
-	case 0: { \
-		int i; \
-		++test_case_depth; \
-\
-		/* Prints what test cases we are in. */ \
-		fprintf(stdout, "case "); \
-		for (i = 0;i < test_case_depth - 1;++i) \
-			fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET TEST_CASESEP, \
-				test_case_info[i].name); \
-\
-		fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n", \
-			test_case_info[i].name, \
-			test_case_info[i].file, \
-			test_case_info[i].line \
-		); \
+	if (!test_fork_(*currcase)) { \
+		test_print_case_path(); \
 		goto TOKENPASTE(test_case_run_, __LINE__); \
+	} else { \
+		switch (currcase->result) { \
+		case EXIT_SUCCESS: \
+		case EXIT_SKIP: \
+			/* Clear output of passed case. */ \
+			/* FIXME: warning: implicit declaration of function ‘truncate’. */ \
+			ftruncate(currtest->outfd, currcase->outlen); \
+			break; \
+		case EXIT_NONFATAL_FAILURE: \
+			*(currcase->parent ? &currcase->parent->result : &currtest->result) = EXIT_NONFATAL_FAILURE; \
+			break; \
+		default: {/* Propagate return code. */ \
+			int result = currcase->result; \
+			currcase = currcase->parent; \
+			test_exit(result); \
+		} \
+		} \
+		currcase = currcase->parent; \
 	} \
-	default: { \
-		int stat_val; \
-		 /* Wait test to finish. */ \
-		wait(&stat_val); \
-		if (WIFEXITED(stat_val) && EXIT_SUCCESS == WEXITSTATUS(stat_val)) \
-			/* We don't care about output of passed cases. */ \
-			ftruncate(currtest->outfd, test_case_info[test_case_depth].outpos); \
-		else \
-			/* Propagate *exit code*. */ \
-			exit(WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE); \
-	} \
-	} \
-	for (;0;TEST_CASE_EXIT_IMPL) TOKENPASTE(test_case_run_, __LINE__):
+	for (;0;test_exit(currcase->result)) TOKENPASTE(test_case_run_, __LINE__):
 
-#define TEST_VAR_(name) \
-	static struct test_test_info test_##name __attribute__((no_reorder, __used__, unused, __section__("test"))) \
+#define TEST_VAR_(type, id) \
+	static struct test_##type##_info test_##id __attribute__((no_reorder, __used__, unused, __section__("test"))) \
 
-#define SUITE(name) \
-	SUITED(#name)
+#define SUITE(id) \
+	SUITED(#id)
 
-#define SUITED(desc) \
-	SUITE_(desc)
+#define SUITED(name) \
+	SUITE_(name)
 
-#define SUITE_(desc) \
-	TEST_VAR_(unit) = {NULL, desc, __FILE__, 0, 0, -1};
+#define SUITE_(name) \
+	TEST_VAR_(suite, suite) = {{test_object_id_suite}, name, __FILE__, 0, 0};
 
-enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, test_hook_teardown_test };
+enum test_object_id {
+	test_object_id_suite,
+	test_object_id_hook,
+	test_object_id_test
+};
+
+enum test_event {
+	test_event_setup_suite,
+	test_event_teardown_suite,
+	test_event_setup_test,
+	test_event_teardown_test
+};
 
 #define HOOK_SUITE_ HOOK__SCOPE__(1)
 #define HOOK_GLOBAL_ HOOK__SCOPE__(2)
@@ -211,7 +215,7 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 	static void test_setup(void); \
 	HOOK(SUITE) \
 	{ \
-		if (test_hook_setup_suite == event) \
+		if (test_event_setup_suite == event) \
 			test_setup(); \
 	} \
 	static void test_setup(void)
@@ -220,7 +224,7 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 	static void test_teardown(void); \
 	HOOK(SUITE) \
 	{ \
-		if (test_hook_teardown_suite == event) \
+		if (test_event_teardown_suite == event) \
 			test_teardown(); \
 	} \
 	static void test_teardown(void)
@@ -228,10 +232,10 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 #define HOOK__SCOPE__(scope) \
 	HOOK__SCOPE___(scope, TOKENPASTE(test_hook_at_line_, __LINE__))
 
-#define HOOK__SCOPE___(scope, name) \
-	static void name(int); \
-	TEST_VAR_(name) = {(void(*)(void))name, NULL, NULL, scope, 0, -1}; \
-	static void name(int event)
+#define HOOK__SCOPE___(scope, id) \
+	static void id(int); \
+	TEST_VAR_(hook, id) = {{test_object_id_hook}, id, scope}; \
+	static void id(int event)
 
 #define STRINGIFY(t) #t
 #define TOKENPASTE_(a, b) a##b
@@ -240,107 +244,152 @@ enum { test_hook_setup_suite, test_hook_teardown_suite, test_hook_setup_test, te
 #define TOKENPASTE3(a, b, c) TOKENPASTE3_(a, b, c)
 
 #ifdef TEST_OUTPUT_HUMAN
-# define TEST_ASSERT_LOC __FILE__, __LINE__,
-# define TEST_ASSERT_LOCFMT "%s:%u: "
+# define TEST_FAILURE_LOC_ __FILE__, __LINE__,
+# define TEST_FAILURE_LOCFMT_ "%s:%u: "
 #else
-# define TEST_ASSERT_LOC
-# define TEST_ASSERT_LOCFMT
+# define TEST_FAILURE_LOC_
+# define TEST_FAILURE_LOCFMT_
 #endif
 
-#define TEST_ASSERT_FORMAT \
-	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed.\n"
-#define TEST_ASSERT_FORMAT_CMPTWO(fmt) \
-	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed; left=" fmt ", right=" fmt ".\n"
-#define TEST_ASSERT_FORMAT_CMPONE(fmt) \
-	TEST_ASSERT_LOCFMT ANSI_RED ANSI_BOLD "Assertion" ANSI_RESET " %s failed; got " fmt ".\n"
+#define TEST_TEST_ASSERT_FAILURE_(code) FATAL_FAILURE(code)
+#define TEST_TEST_EXPECT_FAILURE_(ignored) NONFATAL_FAILURE(EXIT_NONFATAL_FAILURE)
 
-#define TEST_ASSERT_FORMAT_CMPSEL_(type, kind) \
-	TEST_CHOEXPR_(TEST_ISTYPE_(type, char *) || TEST_ISTYPE_(type, char[]), \
-	              TEST_ASSERT_FORMAT_CMP##kind("\"%s\""), \
-	TEST_CHOEXPR_(TEST_ISTYPE_(type, char), \
-	              TEST_ASSERT_FORMAT_CMP##kind("'%c'"), \
-	TEST_CHOEXPR_(TEST_ISTYPE_(type, double) || TEST_ISTYPE_(type, float), \
-	              TEST_ASSERT_FORMAT_CMP##kind("%f"), \
-	              TEST_ASSERT_FORMAT_CMP##kind("%d"))))
+#define TEST_TEST_ASSERT_NOUN_ "Assertion"
+#define TEST_TEST_EXPECT_NOUN_ "Expectation"
 
-#define assert_msg(c, msg) \
-	if (!(c)) { \
-		fprintf(stderr, TEST_ASSERT_FORMAT, TEST_ASSERT_LOC msg); \
-		FAILURE(EXIT_FAILURE); \
-	}
+#define TEST_SUCCESS_FORMAT_TEMPLATE_(test) \
+	TEST_FAILURE_LOCFMT_ ANSI_GREEN test##NOUN_ ANSI_RESET " %s passed.\n"
+#define TEST_FAILURE_FORMAT_TEMPLATE_(test) \
+	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed.\n"
+#define TEST_FAILURE_FORMAT_CMPTWO_TEMPLATE_(test, fmt) \
+	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed; left=" fmt ", right=" fmt ".\n"
+#define TEST_FAILURE_FORMAT_CMPONE_TEMPLATE_(test, fmt) \
+	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed; got " fmt ".\n"
 
-/* Shit on stdandard library. */
-#undef assert
-#define assert(c) \
-	assert_msg(c, "`" #c "'")
+#define TEST_FAILURE_FORMAT_CMPSEL_(test, type, kind) \
+	__builtin_choose_expr(test_istype_(type, char *) || test_istype_(type, char[]), \
+	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "\"%s\""), \
+	__builtin_choose_expr(test_istype_(type, char), \
+	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "'%c'"), \
+	__builtin_choose_expr(test_istype_(type, double) || test_istype_(type, float), \
+	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%f"), \
+	__builtin_choose_expr(test_istype_(type, void *), \
+	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%p"), \
+	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%d")))))
+
+#define test_msg_(test, cond, msg) \
+	if (!(cond)) { \
+		fprintf(stderr, TEST_FAILURE_FORMAT_TEMPLATE_(test), TEST_FAILURE_LOC_ msg); \
+		test##FAILURE_(EXIT_FAILURE); \
+	} \
+
+#define test_istype_(val, type) \
+	__builtin_types_compatible_p(__typeof__(val), type)
+
+#define test_cmp_(lhs, rhs) \
+	__builtin_choose_expr(test_istype_(lhs, char *) || test_istype_(lhs, char[]), \
+	                      (0 == strcmp((char *)(size_t)lhs, (char *)(size_t)rhs)), \
+	                      (lhs == rhs))
+
+#define test_equal_(test, lhs, rhs) \
+do { \
+	__typeof__(lhs) const lhsv = lhs; /* no parenthesis: ("invalid") */ \
+	__typeof__(rhs) const rhsv = rhs; \
+	if (!test_cmp_(lhsv, rhsv)) { \
+		__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
+			fprintf(stderr, TEST_FAILURE_FORMAT_CMPSEL_(test, __typeof__(rhs), ONE), \
+				TEST_FAILURE_LOC_ STRINGIFY(lhs == rhs), __builtin_choose_expr(__builtin_constant_p(rhs), lhsv, rhsv)) \
+			, \
+			fprintf(stderr, TEST_FAILURE_FORMAT_CMPSEL_(test, __typeof__(rhs), TWO), \
+				TEST_FAILURE_LOC_ STRINGIFY(lhs == rhs), lhsv, rhsv) \
+			); \
+		test##FAILURE_(EXIT_FAILURE); \
+	} else if (TEST_VERBOSE) { \
+		fprintf(stderr, TEST_SUCCESS_FORMAT_TEMPLATE_(test), \
+			TEST_FAILURE_LOC_ STRINGIFY(lhs == rhs)); \
+	} \
+} while(0)
+
+/* Basic tests */
+
+#define assert_msg(cond, msg) test_msg_(TEST_TEST_ASSERT_, cond, msg)
+#define expect_msg(cond, msg) test_msg_(TEST_TEST_EXPECT_, cond, msg)
+
+/* Simple tests */
+
+#define assert_true(cond) test_msg_(TEST_TEST_ASSERT_, cond, "`" #cond "'")
+#define assert_null(expr) assert_true(NULL == (expr))
+#define assert_nonnull(expr) assert_true(NULL != (expr))
+#define assert_false(cond) assert_true(!(cond))
+#define expect_true(cond) test_msg_(TEST_TEST_EXPECT_, cond, "`" #cond "'")
+#define expect_false(cond) expect_true(!(cond))
+
+/* Smart tests */
+
+#define assert_equal(lhs, rhs) test_equal_(TEST_TEST_ASSERT_, lhs, rhs)
+#define expect_equal(lhs, rhs) test_equal_(TEST_TEST_EXPECT_, lhs, rhs)
 
 #define assert_memequal(lhs, rhs, size) \
 	assert(0 == memcmp(lhs, rhs, size));
 
-#define TEST_ISTYPE_(val, type) \
-	__builtin_types_compatible_p(__typeof__(val), type)
+void test_print_suite_path(void);
+void test_print_test_path(void);
+void test_print_case_path(void);
 
-#define TEST_CHOEXPR_(cond, thenexpr, elseexpr) \
-	__builtin_choose_expr(cond, thenexpr, elseexpr)
-
-#define assert_cmp_(lhs, rhs) \
-	TEST_CHOEXPR_(TEST_ISTYPE_(lhs, char *) || TEST_ISTYPE_(lhs, char[]), \
-	              (0 == strcmp((char *)(size_t)lhs, (char *)(size_t)rhs)), \
-	              (lhs == rhs))
-
-/* I really hope every type is here. */
-union test_converter_any_union {
-	void *ptr;
-	void const *const_ptr;
-	float flt;
-	double dbl;
-	signed char c;
-	unsigned char uc;
-	signed short s;
-	unsigned short us;
-	signed int i;
-	unsigned int ui;
-	signed long l;
-	unsigned long ul;
-#if __STDC_VERSION__ > 199901L
-	signed long long ll;
-	unsigned long long ull;
-#endif
-} __attribute__((__transparent_union__));
-
-static inline __attribute__((const))
-double test_flt2dbl(union test_converter_any_union u) {
-	return (double)u.flt; /* Awesome... */
-}
-
-#define TEST_TYPEFORPRINT(val) \
-	__builtin_choose_expr(__builtin_types_compatible_p(__typeof__(val), float), test_flt2dbl(val), val)
-
-#define assert_eq assert_equal
-#define assert_lt assert_less
-#define assert_gt assert_less
-
-#define static_assert(cond, msg) typedef char _test_static_assert_lhs_and_rhs_differ_in_type[cond - 1];
-
-/* _Pragma operator was introduced in C99. */
-#define assert_equal(lhs, rhs) \
+#define FATAL_FAILURE(code) test_exit(code);
+#define NONFATAL_FAILURE(code) \
 do { \
-	__typeof__(lhs) const lhsv = (lhs); \
-	__typeof__(rhs) const rhsv = (rhs); \
-	if (!assert_cmp_(lhsv, rhsv)) { \
-__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
-		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL_(__typeof__(rhs), ONE), \
-			TEST_ASSERT_LOC \
-			STRINGIFY(lhs == rhs), \
-			__builtin_choose_expr(__builtin_constant_p(rhs), TEST_TYPEFORPRINT(lhsv), TEST_TYPEFORPRINT(rhsv))), \
-		fprintf(stderr, TEST_ASSERT_FORMAT_CMPSEL_(__typeof__(rhs), TWO), \
-			TEST_ASSERT_LOC \
-			STRINGIFY(lhs == rhs), \
-			TEST_TYPEFORPRINT(lhsv), \
-			TEST_TYPEFORPRINT(rhsv))); \
-		FAILURE(EXIT_FAILURE); \
-	} \
-} while (0);
+	int *result = (currcase ? &currcase->result : &currtest->result); \
+	if (EXIT_SUCCESS == *result) \
+		*result = (code); \
+} while(0)
+
+struct test_info_header {
+	unsigned char const type;
+};
+
+struct test_suite_info {
+	struct test_info_header const header;
+	char const *const name;
+	char const *const file;
+	unsigned num_tests;
+	int setup_ran;
+} __attribute__((aligned(64)));
+
+struct test_hook_info {
+	struct test_info_header const header;
+	void(*const hook)(int event);
+	unsigned scope;
+} __attribute__((aligned(64)));
+
+struct test_test_info {
+	struct test_info_header const header;
+	char const *const name;
+	char const *const file;
+	unsigned line;
+	void(*const run)(void);
+	unsigned long iters;
+	int outfd;
+	unsigned long total_ns;
+	int result;
+} __attribute__((aligned(64)));
+
+/** Info about test case. */
+struct test_case_info {
+	char const *name;
+	char const *file;
+	unsigned line;
+	off_t outlen;
+	struct test_case_info *parent;
+	struct test_case_info *child;
+	int result;
+#ifdef TEST_NOFORK
+	jmp_buf env;
+#endif
+};
+
+void test_exit(int code);
+int test_fork(int *result) __attribute__((returns_twice));
 
 #endif /* TEST_H */
 /* vim:set ft=c ts=4 sw=4 noet: */

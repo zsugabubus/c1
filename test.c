@@ -61,18 +61,16 @@
 #define OUTPUT_HUMAN_TEST_MINLEN (5 + 5 + 11)
 
 #define FREE __attribute__((cleanup(varfree)))
-#define CONST __attribute__((const))
-#define UNUSED __attribute__((unused))
 
-extern struct test_test_info __start_test, __stop_test;
+extern char __start_test;
+extern char __stop_test;
 
-int test_case_depth = 0;
-struct test_case_info test_case_info[7];
-struct test_test_info *currtest;
-struct test_test_info *currsuite;
+struct test_suite_info *currsuite = NULL;
+struct test_test_info *currtest = NULL;
+struct test_case_info *currcase = NULL;
 
 /* Free variable. */
-UNUSED static
+__attribute__((nonnull, unused)) static
 void varfree(char *const*const var) {
 	free(*var);
 }
@@ -81,10 +79,42 @@ void varfree(char *const*const var) {
 #define MS_NS 1000000ul
 #define SEC_NS 1000000000ul
 
+#ifndef TEST_NOFORK
+int test_fork(int *result) {
+	switch (fork()) {
+	case 0: return 0;
+	case -1:
+		perror("fork");
+		exit(EXIT_FAILURE);
+	default: {
+		int stat_val;
+		wait(&stat_val);
+		*result = WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE;
+		return 1;
+	}
+	}
+}
+#endif
+
+void test_exit(int code) {
+#ifndef TEST_NOFORK
+	exit(code);
+#else
+	*(currcase ? &currcase->result : &currtest->result) = code;
+	longjmp(currcase ? currcase->env : test_test_env, code + 1);
+#endif
+}
+
+#ifdef TEST_NOFORK
+static struct {
+	jmp_buf env;
+} fake_test_env;
+#endif
+
 /** Write content of `fd` to stderr. */
 static
 void cat(int fd) {
-	char buf[(1 << 12)];
+	char buf[(1 << 13)];
 	ssize_t len = 0;
 	ssize_t plen;
 	off_t offset;
@@ -98,7 +128,7 @@ void cat(int fd) {
 }
 
 /** Return a time unit that makes sense for human beings. */
-CONST static
+__attribute__((const)) static
 unsigned long nstohtime(unsigned long ns) {
 	if (ns < 10 * US_NS)
 		return ns;
@@ -111,7 +141,7 @@ unsigned long nstohtime(unsigned long ns) {
 }
 
 /** Return time value that matches with human time unit. */
-CONST static
+ __attribute__((returns_nonnull, const)) static
 char const *nstohunit(unsigned long ns) {
 	if (ns < 10 * US_NS)
 		return "ns";
@@ -124,7 +154,7 @@ char const *nstohunit(unsigned long ns) {
 }
 
 /** Return time in nanoseconds. */
-CONST static
+__attribute__((const)) static
 unsigned long tstons(struct timespec const *const ts) {
 	return ts->tv_sec * SEC_NS + ts->tv_nsec;
 }
@@ -150,7 +180,7 @@ void print_hline(int n, char ch) {
 
 #if TEST_OUTPUT_XML
 /** XML escape `text`. */
-static
+__attribute__((returns_nonnull, nonnull)) static
 char *xmlesc(char const *const text) {
 	char const *inp;
 	char *esctext = NULL;
@@ -173,12 +203,12 @@ escape:
 			else
 				++outp;
 			break;
-		case '"':  EMIT("&quot;")
-		case '&':  EMIT("&amp;");
+		case '"': EMIT("&quot;")
+		case '&': EMIT("&amp;");
 		case '\'': EMIT("&apos;");
-		case '<':  EMIT("&lt;");
-		case '>':  EMIT("&gt;");
-		case '\0': 
+		case '<': EMIT("&lt;");
+		case '>': EMIT("&gt;");
+		case '\0':
 			if (esctext)
 				*outp = '\0';
 			else
@@ -203,8 +233,30 @@ end_loop:
 }
 #endif
 
-UNUSED static
-char signame[NSIG][7];
+void test_print_suite_path(void) {
+	fprintf(stderr, "suite " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
+		currtest->name, currtest->file);
+}
+
+void test_print_test_path(void) {
+	fprintf(stderr, TEST_TEST_PREFIX ANSI_BOLD "test " "%s" ANSI_RESET " (%s:%u):\n",
+		currtest->name, currtest->file, currtest->line);
+}
+
+void test_print_case_path(void) {
+	struct test_case_info *p;
+
+	fprintf(stdout, TEST_CASE_PREFIX ANSI_BOLD "case" ANSI_RESET " %s" TEST_CASE_SEPARATOR, currtest->name);
+	for (p = currcase;p->parent;p = p->parent)
+		;
+
+	for (;p->child;p = p->child)
+		fprintf(stdout, "%s" ANSI_RESET TEST_CASE_SEPARATOR,
+			p->name);
+
+	fprintf(stdout, ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n",
+		p->name, p->file, p->line);
+}
 
 /** Default signal handler. */
 static
@@ -219,26 +271,20 @@ void sighandler(int sig, siginfo_t *info, void *ucontext) {
 	fprintf(stderr, "\nBacktrace:\n");
 	backtrace_symbols_fd(array, size, STDERR_FILENO);
 
-	signal(sig, SIG_DFL);
-	raise(sig);
+	test_exit(EXIT_FAILURE);
 }
 
 /** Initialize signal handling. */
 static
 void sighandler_init(void) {
-	int sig;
-
 	static struct sigaction sa;
 	sa.sa_sigaction = sighandler;
 	sa.sa_flags = SA_RESTART | SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 
-	/* Use pretty signal names if action is Core, Stop or Term and then attach
-	 * a signal handler for it. Otherwise just use its number. */
-
 #define SIG(name) \
-    strncpy(signame[SIG##name], #name, sizeof(*signame));
-	
+	sigaction(SIG##name, &sa, NULL);
+
 	SIG(ABRT  ) SIG(ALRM  ) SIG(BUS   ) SIG(FPE   ) SIG(HUP   )
 	SIG(ILL   ) SIG(INT   ) SIG(KILL  ) SIG(PIPE  ) SIG(POLL  )
 	SIG(PROF  ) SIG(QUIT  ) SIG(SEGV  ) SIG(STOP  ) SIG(TSTP  )
@@ -246,37 +292,47 @@ void sighandler_init(void) {
 	SIG(USR1  ) SIG(USR2  ) SIG(VTALRM) SIG(XCPU  ) SIG(XFSZ  )
 
 #undef SIG
-
-	for (sig = 1; sig < NSIG; ++sig) {
-		if (signame[sig][0])
-			sigaction(sig, &sa, NULL);
-		else
-			snprintf((char*)(signame + sig), sizeof(*signame), "(%02d)", sig);
-	}
 }
+
+union object_ptr {
+	void *ptr;
+	struct test_info_header *header;
+	struct test_suite_info *suite;
+	struct test_hook_info *hook;
+	struct test_test_info *test;
+};
 
 static
 void fire_event(int event) {
-	struct test_test_info *tti;
-
-	for (tti = &__start_test;tti < currtest;++tti) {
-		unsigned const scope = tti->line;
-
-		if (tti->file)
+	union object_ptr p;
+	for (p.ptr = (void*)&__start_test;p.test < currtest;) {
+		switch (p.header->type) {
+		case test_object_id_suite:
+			++p.suite;
+			break;
+		case test_object_id_hook:
+			if (2/*global*/ == p.hook->scope ||
+			   (1/*suite */ == p.hook->scope && p.suite >= currsuite))
+				p.hook->hook(event);
+			++p.hook;
 			continue;
-
-		if (2/*global*/ == scope ||
-		   (1/*suite */ == scope && tti > currsuite))
-			((void(*)(int))tti->run)(event); /* TODO: Make an union. */
+		case test_object_id_test:
+			++p.test;
+			break;
+		default:
+			__builtin_unreachable();
+		}
 	}
 }
 
 int main(int argc, char **argv) {
-
 	enum { test_suite, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
+	union object_ptr p;
 	int width = 0;
-	int gathered UNUSED = 0;
+#ifndef TEST_NOGATHEROUTPUT
+	int gathered = 0;
+#endif
 	unsigned long *shm_total_ns;
 	struct timespec ts_start;
 	struct timespec ts_end;
@@ -299,35 +355,38 @@ int main(int argc, char **argv) {
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
-	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
+	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
 		int len;
-		
-		/* One struct is enough for everything. */
-		if (currtest->run) {
-			if (!currtest->file)
-				/* Runnable. */
-				continue;
 
+		switch (p.header->type) {
+		case test_object_id_suite:
+			currsuite = p.suite;
+			++stat[test_suite];
+
+			len = strlen(currsuite->name) + strlen(currsuite->file) + OUTPUT_HUMAN_SUITE_MINLEN;
+			if (len > width)
+				width = len;
+
+			++p.suite;
+			break;
+		case test_object_id_hook:
+			++p.hook;
+			continue;
+		case test_object_id_test:
 			++stat[test_total];
 
 			/* Count tests in suites. */
 			if (currsuite)
-				++currsuite->line;
+				++currsuite->num_tests;
 
-			if (!currtest->desc)
-				continue;
-
-			len = strlen(currtest->desc) + OUTPUT_HUMAN_TEST_MINLEN;
+			len = strlen(p.test->name) + OUTPUT_HUMAN_TEST_MINLEN;
 			if (len > width)
 				width = len;
 
-		} else {
-			currsuite = currtest;
-			++stat[test_suite];
-
-			len = strlen(currtest->desc) + strlen(currtest->file) + OUTPUT_HUMAN_SUITE_MINLEN;
-			if (len > width)
-				width = len;
+			++p.test;
+			break;
+		default:
+			__builtin_unreachable();
 		}
 	}
 
@@ -336,7 +395,7 @@ int main(int argc, char **argv) {
 
 #ifdef TEST_OUTPUT_HUMAN
 	fprintf(stdout, "running %u tests\n",
-		stat[test_total]);
+			stat[test_total]);
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 	{
 		char datetime[23];
@@ -349,13 +408,13 @@ int main(int argc, char **argv) {
 
 		strftime(datetime, sizeof(datetime), "%Y-%m-%d %T", localnow);
 		fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_START
-			datetime);
+				datetime);
 	}
 #endif
 
 	shm_total_ns = mmap(NULL, sizeof(*shm_total_ns),
-		PROT_READ | PROT_WRITE,
-		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+			PROT_READ | PROT_WRITE,
+			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	if (MAP_FAILED == shm_total_ns) {
 		perror("mmap");
@@ -363,33 +422,43 @@ int main(int argc, char **argv) {
 	}
 
 	currsuite = NULL;
-	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
+	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
 		int argi;
 		int skip;
+#ifdef TEST_NOFORK
+		int oldstderr;
+		int oldstdout;
+#endif
 
-		if (!currtest->run) {
+		switch (p.header->type) {
+		case test_object_id_suite:
 			/* Suite start marker. */
-			currsuite = currtest;
+			currsuite = p.suite;
 #ifdef TEST_OUTPUT_HUMAN
 			fprintf(stdout, "\nsuite " ANSI_BOLD "%s" ANSI_RESET " (%s):\n",
-				currtest->desc, currtest->file);
+					currsuite->name, currsuite->file);
 			print_hline(width, '-');
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 			fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_START,
-				currtest->desc);
+					currsuite->name);
 #endif
-			fire_event(test_hook_setup_suite);
+			++p.suite;
 			goto next_test;
-		}
-
-		if (!currtest->file)
-			/* Runnable. */
+		case test_object_id_hook:
+			++p.hook;
 			continue;
+		case test_object_id_test:
+			currtest = p.test;
+			++p.test;
+			break;
+		default:
+			__builtin_unreachable();
+		}
 
 #ifdef TEST_OUTPUT_HUMAN
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
-			currtest->desc,
-			width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->desc), "");
+				currtest->name,
+				width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->name), "");
 		fflush(stdout);
 #endif
 
@@ -397,24 +466,24 @@ int main(int argc, char **argv) {
 			char *filter = argv[argi];
 			int should_skip = 0;
 			switch (filter[0]) {
-			case '+':
-				++filter;
-				break;
-			case '-':
-				++filter;
-				should_skip = 1;
-				break;
+				case '+':
+					++filter;
+					break;
+				case '-':
+					++filter;
+					should_skip = 1;
+					break;
 			}
 
 			if (1 == argi)
 				skip = !should_skip;
 
-			if (strstr(currtest->desc, filter))
+			if (strstr(currtest->name, filter))
 				skip = should_skip;
 		}
 
 		if (skip || 0 == currtest->iters) {
-		test_skip:
+test_skip:
 			++stat[test_skipped];
 #ifdef TEST_OUTPUT_HUMAN
 			fprintf(stdout, ANSI_BLUE ANSI_BOLD "skipped" ANSI_RESET "\n");
@@ -422,7 +491,7 @@ int main(int argc, char **argv) {
 			goto drop_output;
 		}
 
-		currtest->outfd = memfd_create(currtest->desc, 0);
+		currtest->outfd = memfd_create(currtest->name, 0);
 		if (-1 == currtest->outfd) {
 			perror("memfd_create");
 			exit(EXIT_FAILURE);
@@ -430,21 +499,27 @@ int main(int argc, char **argv) {
 
 		*shm_total_ns = -1;
 
-		fire_event(test_hook_setup_test);
+		if (!currsuite->setup_ran) {
+			currsuite->setup_ran = 1;
+			fire_event(test_event_setup_suite);
+		}
 
-		switch (TEST_FORK_IMPL_) {
-		case -1:
-			perror("fork");
-			exit(EXIT_FAILURE);
-		case 0: {
+		fire_event(test_event_setup_test);
+
+#ifdef TEST_NOFORK
+		oldstderr = dup(STDERR_FILENO);
+		oldstdout = dup(STDOUT_FILENO);
+#endif
+
+#ifndef TEST_NOFORK
+		if (!test_fork_(*currtest)) {
+#else
+		if (!test_fork_(fake_test_env)) {
+#endif
 			struct timespec ts_test_start;
 			struct timespec ts_test_end;
 			unsigned iters = currtest->iters;
-#ifdef TEST_NOFORK
-			int result = EXIT_SUCCESS;
-			int oldstderr = dup(STDERR_FILENO);
-			int oldstdout = dup(STDOUT_FILENO);
-#endif
+
 			dup2(currtest->outfd, STDERR_FILENO);
 			setvbuf(stderr, NULL, _IONBF, 0);
 #ifdef TEST_OUTPUT_HUMAN
@@ -453,163 +528,115 @@ int main(int argc, char **argv) {
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 			dup2(nullfd, STDOUT_FILENO);
 #endif
-
 			clock_gettime(CLOCK_MONOTONIC, &ts_test_start);
-#ifndef TEST_NOFORK
+
 			while (iters-- > 0)
 				currtest->run();
-#else
-			test_case_depth = 0;
-			while (iters-- > 0 && EXIT_SUCCESS != (currtest->run(&result), result))
-				;
-#endif
-			clock_gettime(CLOCK_MONOTONIC, &ts_test_end);
 
+			clock_gettime(CLOCK_MONOTONIC, &ts_test_end);
 			tsdiff(&ts_test_end, &ts_test_start, &ts_test_start);
 			*shm_total_ns = tstons(&ts_test_start);
 
-#ifndef TEST_NOFORK
-			exit(EXIT_SUCCESS);
-#else
+			test_exit(currtest->result);
+		} else {
+#ifdef TEST_NOFORK
 			dup2(oldstderr, STDERR_FILENO);
 			dup2(oldstdout, STDOUT_FILENO);
-
-			if (EXIT_SUCCESS == result)
-				goto test_passed;
-			else
-				goto test_failed;
 #endif
-		}
-		default: {
-			int stat_val;
-			/* Wait test to finish */
-			wait(&stat_val);
-			/* Exited normally. */
-			if (WIFEXITED(stat_val)) {
-				switch (WEXITSTATUS(stat_val)) {
-				case EXIT_SUCCESS: {
-					char info[66];
 
-#ifdef TEST_NOFORK
-				test_passed:
-#endif
-					if (-1 == *shm_total_ns) {
-#ifdef TEST_OUTPUT_HUMAN
-						fprintf(stdout, ANSI_RED ANSI_BOLD "not ok" ANSI_RESET "\n");
-						goto test_fail_action;
-#elif defined(TEST_OUTPUT_LIBCHECKXML)
-						goto test_failed;
-#endif
-					}
+			switch (currtest->result) {
+			case EXIT_SUCCESS: {
+				char info[66];
+				if (-1 == *shm_total_ns)
+					goto test_failed;
 
-					currtest->total_ns = *shm_total_ns;
+				currtest->total_ns = *shm_total_ns;
 
-					if (currtest->iters == 1)
-						snprintf(info, sizeof(info), "%4lu %s",
+				if (currtest->iters == 1)
+					snprintf(info, sizeof info, "%4lu %s",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns));
-					else
-						snprintf(info, sizeof(info), "%4lu %s / %9lu iters = %4lu %s/iter",
+				else
+					snprintf(info, sizeof info, "%4lu %s / %9lu iters = %4lu %s/iter",
 							nstohtime(currtest->total_ns),
 							nstohunit(currtest->total_ns),
 							currtest->iters,
 							nstohtime((currtest->total_ns + currtest->iters - 1) / currtest->iters),
 							nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
 
-					++stat[test_passed];
+				++stat[test_passed];
 #ifdef TEST_OUTPUT_HUMAN
-					fprintf(stdout, ANSI_GREEN ANSI_BOLD "ok" ANSI_RESET ", %s\n", info);
-#elif defined(TEST_OUTPUT_LIBCHECKXML)
-					{
-						char *path FREE = strdup(currtest->file);
-						char *dname FREE = xmlesc(dirname(path));
-						char *bname FREE = xmlesc(basename(path));
-						char *escdesc FREE = xmlesc(currtest->desc);
-						fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
-							"success", dname, bname, currtest->line,
-							escdesc,
-							currtest->iters - 1l,
-							(float)currtest->total_ns / SEC_NS,
-							"Core", "Passed");
-					}
-#endif
-					goto drop_output;
-				}
-				case 77: /* Special exit code. */
-					goto test_skip;
-				default: /* Others. */
-#ifdef TEST_OUTPUT_HUMAN
-					fprintf(stdout, ANSI_RED ANSI_BOLD "FAILED" ANSI_RESET "\n");
-#elif defined(TEST_OUTPUT_LIBCHECKXML)
-				test_failed:
-					{
-						char *path FREE = strdup(currtest->file);
-						char *dname FREE = xmlesc(dirname(path));
-						char *bname FREE = xmlesc(basename(path));
-						char *escerr FREE = NULL;
-						off_t errlen;
-
-						write(currtest->outfd, "\0", sizeof(char));
-						errlen = lseek(currtest->outfd, 0, SEEK_CUR);
-						if (errlen > 1) {
-							char *errtext = mmap(NULL, errlen * sizeof(char),
-									PROT_READ, MAP_SHARED,
-									currtest->outfd, 0);
-							escerr = xmlesc(errtext);
-							munmap(errtext, errlen * sizeof(char));
-						}
-
-						fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
-							"failure", dname, bname, currtest->line,
-							currtest->desc, -1l, -1.0,
-							"Core", escerr ? escerr : "Failure");
-					}
-#endif
-					goto test_fail_action;
-				}
-			} else {
-#ifdef TEST_OUTPUT_HUMAN
-
-				fprintf(stdout, ANSI_RED ANSI_BOLD "SIG%s" ANSI_RESET "\n",
-					signame[WTERMSIG(stat_val)]);
+				fprintf(stdout, ANSI_GREEN ANSI_BOLD "ok" ANSI_RESET ", %s\n", info);
 #elif defined(TEST_OUTPUT_LIBCHECKXML)
 				{
 					char *path FREE = strdup(currtest->file);
 					char *dname FREE = xmlesc(dirname(path));
 					char *bname FREE = xmlesc(basename(path));
-					char *escdesc FREE = xmlesc(currtest->desc);
+					char *escdesc FREE = xmlesc(currtest->name);
 					fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
-						"failure", dname, bname, currtest->line,
-						escdesc, -1l, -1.0,
-						"Core", strsignal(WTERMSIG(stat_val)));
+						"success", dname, bname, currtest->line,
+						escdesc,
+						currtest->iters - 1l,
+						(float)currtest->total_ns / SEC_NS,
+						"Core", "Passed");
 				}
 #endif
-			test_fail_action:
-				++stat[test_failed];
+					goto drop_output;
+			}
+			case EXIT_SKIP: /* Special exit code. */
+				goto test_skip;
+			default: { /* Others. */
+			test_failed:
+#ifdef TEST_OUTPUT_HUMAN
+				fprintf(stdout, ANSI_RED ANSI_BOLD "FAILED" ANSI_RESET "\n");
+#elif defined(TEST_OUTPUT_LIBCHECKXML)
+				char *path FREE = strdup(currtest->file);
+				char *dname FREE = xmlesc(dirname(path));
+				char *bname FREE = xmlesc(basename(path));
+				char *escerr FREE = NULL;
+				off_t errlen;
+
+				write(currtest->outfd, "\0", sizeof(char));
+				errlen = lseek(currtest->outfd, 0, SEEK_CUR);
+				if (errlen > 1) {
+					char *errtext = mmap(NULL, errlen * sizeof(char),
+							PROT_READ, MAP_SHARED,
+							currtest->outfd, 0);
+					escerr = xmlesc(errtext);
+					munmap(errtext, errlen * sizeof(char));
+				}
+
+				fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_TEST,
+						"failure", dname, bname, currtest->line,
+						currtest->name, -1l, -1.0,
+						"Core", escerr ? escerr : "Failure");
+#endif
+					++stat[test_failed];
 
 #ifdef TEST_NOGATHEROUTPUT
-				cat(currtest->outfd);
+					cat(currtest->outfd);
 #elif defined(TEST_OUTPUT_HUMAN)
-				goto next_test; /* Keep output. */
+					goto next_test; /* Keep output. */
 #endif
 			}
-		}
+			}
 		}
 
-		fire_event(test_hook_teardown_test);
-
-	drop_output:
+drop_output:
 		close(currtest->outfd);
 		currtest->outfd = -1;
-	next_test:
+next_test:
+		fire_event(test_event_teardown_test);
+
 		if (currsuite) {
-			if (0 == currsuite->line) {
+			if (0 == currsuite->num_tests) {
 #ifdef TEST_OUTPUT_LIBCHECKXML
 				fprintf(stdout, OUTPUT_LIBCHECK_TEMPLATE_SUITE_END);
 #endif
-				fire_event(test_hook_teardown_suite);
+				if (currsuite->setup_ran)
+					fire_event(test_event_teardown_suite);
 			} else {
-				--currsuite->line;
+				--currsuite->num_tests;
 			}
 		}
 	}
@@ -620,17 +647,30 @@ int main(int argc, char **argv) {
 # ifdef TEST_OUTPUT_HUMAN
 	print_hline(width, '=');
 # endif
-	for (currtest = &__start_test;currtest < &__stop_test;++currtest) {
-		if (-1 == currtest->outfd)
-			continue;
+	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
+		switch (p.header->type) {
+		case test_object_id_suite:
+			++p.suite;
+			break;
+		case test_object_id_hook:
+			++p.hook;
+			break;
+		case test_object_id_test:
+			if (-1 != p.test->outfd) {
+				gathered = 1;
+				currtest = p.test;
+				test_print_test_path();
+				cat(p.test->outfd);
 
-		gathered = 1;
-		fprintf(stderr, "test " ANSI_BOLD "%s" ANSI_RESET " (%s:%u):\n",
-			currtest->desc, currtest->file, currtest->line);
-		cat(currtest->outfd);
+				close(p.test->outfd);
+				p.test->outfd = -1;
+			}
+			++p.test;
+			break;
+		default:
+			__builtin_unreachable();
+		}
 
-		close(currtest->outfd);
-		currtest->outfd = -1;
 	}
 #endif
 
