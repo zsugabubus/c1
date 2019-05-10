@@ -413,8 +413,8 @@ int main(int argc, char **argv) {
 #endif
 
 	shm_total_ns = mmap(NULL, sizeof(*shm_total_ns),
-			PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+		PROT_READ | PROT_WRITE,
+		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	if (MAP_FAILED == shm_total_ns) {
 		perror("mmap");
@@ -457,22 +457,23 @@ int main(int argc, char **argv) {
 
 #ifdef TEST_OUTPUT_HUMAN
 		fprintf(stdout, "test " ANSI_BOLD "%s" ANSI_RESET " ... %*s",
-				currtest->name,
-				width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->name), "");
+			currtest->name,
+			width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->name), "");
 		fflush(stdout);
 #endif
 
 		for (skip = 0, argi = 1;argi < argc;++argi) {
 			char *filter = argv[argi];
 			int should_skip = 0;
+
 			switch (filter[0]) {
-				case '+':
-					++filter;
-					break;
-				case '-':
-					++filter;
-					should_skip = 1;
-					break;
+			case '+':
+				++filter;
+				break;
+			case '-':
+				++filter;
+				should_skip = 1;
+				break;
 			}
 
 			if (1 == argi)
@@ -554,15 +555,15 @@ test_skip:
 
 				if (currtest->iters == 1)
 					snprintf(info, sizeof info, "%4lu %s",
-							nstohtime(currtest->total_ns),
-							nstohunit(currtest->total_ns));
+						nstohtime(currtest->total_ns),
+						nstohunit(currtest->total_ns));
 				else
 					snprintf(info, sizeof info, "%4lu %s / %9lu iters = %4lu %s/iter",
-							nstohtime(currtest->total_ns),
-							nstohunit(currtest->total_ns),
-							currtest->iters,
-							nstohtime((currtest->total_ns + currtest->iters - 1) / currtest->iters),
-							nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
+						nstohtime(currtest->total_ns),
+						nstohunit(currtest->total_ns),
+						currtest->iters,
+						nstohtime((currtest->total_ns + currtest->iters - 1) / currtest->iters),
+						nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
 
 				++stat[test_passed];
 #ifdef TEST_OUTPUT_HUMAN
