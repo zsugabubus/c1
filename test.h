@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 zsugabubus
+ * Copyright (C) 2019,2020 zsugabubus
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,40 +28,8 @@
 #include <sys/wait.h> /* wait */
 #include <unistd.h> /* fork, dup2, ftruncate */
 
-#ifndef TEST_CASE_SEPARATOR
-# define TEST_CASE_SEPARATOR " / "
-#endif
-
-#ifndef TEST_TEST_PREFIX
-# define TEST_TEST_PREFIX ""
-#endif
-
-#ifndef TEST_CASE_PREFIX
-# define TEST_CASE_PREFIX ""
-#endif
-
 #ifndef TEST_VERBOSE
 # define TEST_VERBOSE 0
-#endif
-
-#ifndef TEST_NOSTYLES
-# define ANSI_BOLD  "\x1b[1m"
-# define ANSI_RESET "\x1b[0m"
-# ifndef TEST_NOCOLORS
-#  define ANSI_RED "\x1b[31m"
-#  define ANSI_GREEN "\x1b[32m"
-#  define ANSI_BLUE "\x1b[34m"
-# else
-#  define ANSI_RED ""
-#  define ANSI_GREEN ""
-#  define ANSI_BLUE ""
-# endif
-#else
-#define ANSI_BOLD  ""
-#define ANSI_RESET ""
-#define ANSI_RED ""
-#define ANSI_GREEN ""
-#define ANSI_BLUE ""
 #endif
 
 #define EXIT_SKIP 77
@@ -70,17 +38,6 @@
 extern struct test_suite_info *currsuite;
 extern struct test_test_info *currtest;
 extern struct test_case_info *currcase;
-
-/* Default XML output. */
-#ifdef TEST_OUTPUT_XML
-# define TEST_OUTPUT_LIBCHECKXML
-#endif
-
-/* Default output format. */
-#if !defined(TEST_OUTPUT_HUMAN) && \
-    !defined(TEST_OUTPUT_LIBCHECKXML)
-# define TEST_OUTPUT_HUMAN
-#endif
 
 #define BENCHIFND_(static_rtype, id, name, repeat) \
 	static_rtype id(void); \
@@ -111,7 +68,7 @@ extern struct test_case_info *currcase;
 	BENCHIFD(name, 1, cond)
 
 #define TESTD(name) \
-	TESTIFD(name, 1)
+	TESTIFD(#name, 1)
 
 #define BENCHIF(id, repeat, cond) \
 	BENCHIFND(id, #id, repeat, cond)
@@ -243,13 +200,8 @@ enum test_event {
 #define TOKENPASTE(a, b) TOKENPASTE_(a, b)
 #define TOKENPASTE3(a, b, c) TOKENPASTE3_(a, b, c)
 
-#ifdef TEST_OUTPUT_HUMAN
 # define TEST_FAILURE_LOC_ __FILE__, __LINE__,
 # define TEST_FAILURE_LOCFMT_ "%s:%u: "
-#else
-# define TEST_FAILURE_LOC_
-# define TEST_FAILURE_LOCFMT_
-#endif
 
 #define TEST_TEST_ASSERT_FAILURE_(code) FATAL_FAILURE(code)
 #define TEST_TEST_EXPECT_FAILURE_(ignored) NONFATAL_FAILURE(EXIT_NONFATAL_FAILURE)
@@ -258,13 +210,13 @@ enum test_event {
 #define TEST_TEST_EXPECT_NOUN_ "Expectation"
 
 #define TEST_SUCCESS_FORMAT_TEMPLATE_(test) \
-	TEST_FAILURE_LOCFMT_ ANSI_GREEN test##NOUN_ ANSI_RESET " %s passed.\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[32m" test##NOUN_ "\x1b[0m" " %s passed.\n"
 #define TEST_FAILURE_FORMAT_TEMPLATE_(test) \
-	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed.\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed.\n"
 #define TEST_FAILURE_FORMAT_CMPTWO_TEMPLATE_(test, fmt) \
-	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed; left=" fmt ", right=" fmt ".\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed; left=" fmt ", right=" fmt ".\n"
 #define TEST_FAILURE_FORMAT_CMPONE_TEMPLATE_(test, fmt) \
-	TEST_FAILURE_LOCFMT_ ANSI_RED ANSI_BOLD test##NOUN_ ANSI_RESET " %s failed; got " fmt ".\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed; got " fmt ".\n"
 
 #define TEST_FAILURE_FORMAT_CMPSEL_(test, type, kind) \
 	__builtin_choose_expr(test_istype_(type, char *) || test_istype_(type, char[]), \
