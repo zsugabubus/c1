@@ -14,7 +14,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+#undef _GNU_SOURCE
 #define _GNU_SOURCE
+#undef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
 # include <dlfcn.h> /* dlopen */
@@ -24,15 +26,14 @@
 #include <signal.h> /* signal */
 #include <sys/mman.h> /* memfd_create */
 #include <time.h> /* clock_gettime */
-
+#include <sys/ioctl.h> /* terminal ioctl */
+#include <errno.h> /* errno */
 #include <stdio.h>
 
 #include "test.h"
 
-#define OUTPUT_HUMAN_SUITE_MINLEN (5 + 4)
-#define OUTPUT_HUMAN_TEST_MINLEN (5 + 5 + 11)
-
-#define FREE __attribute__((cleanup(varfree)))
+#define OUTPUT_SUITE_MINLEN (5 + 4)
+#define OUTPUT_TEST_MINLEN (5 + 5 + 11)
 
 extern char __start_test;
 extern char __stop_test;
@@ -91,8 +92,16 @@ void cat(int fd) {
 	ssize_t plen;
 	off_t offset;
 
-	for (offset = 0;plen = len, (len = pread(fd, buf, sizeof(buf), offset)) > 0;offset += len)
-		write(STDERR_FILENO, buf, len);
+	for (offset = 0;plen = len, (len = pread(fd, buf, sizeof(buf), offset)) > 0;offset += len) {
+		while (-1 == write(STDERR_FILENO, buf, len)) {
+			if (EAGAIN == errno)
+				continue;
+
+			perror("write");
+			break;
+		}
+
+	}
 
 	if (0 == plen || buf[plen - 1] != '\n')
 		fputs("\x1b[7m$\x1b[0m\n", stderr);
@@ -149,27 +158,31 @@ void print_hline(int n, char ch) {
 }
 
 void test_print_suite_path(void) {
-	fprintf(stderr, "suite " "\x1b[1m" "%s" "\x1b[0m" " (%s):\n",
-		currtest->name, currtest->file);
+	if (strlen(currsuite->name) > 0)
+		fprintf(stdout, "\nsuite \x1b[1m%s\x1b[0m (%s:%u):\n",
+			currsuite->name, currsuite->file, currsuite->line);
+	else
+		fprintf(stdout, "\nfile %s\x1b[1m%s\x1b[0m:\n",
+			currsuite->name, currsuite->file);
 }
 
 void test_print_test_path(void) {
-	fprintf(stderr, "\x1b[1m" "test " "%s" "\x1b[0m" " (%s:%u):\n",
+	fprintf(stdout, "\x1b[1mtest %s\x1b[0m (%s:%u):\n",
 		currtest->name, currtest->file, currtest->line);
 }
 
 void test_print_case_path(void) {
 	struct test_case_info *p;
 
-	fprintf(stdout, "\x1b[1m" "case" "\x1b[0m" " %s/", currtest->name);
+	fprintf(stdout, "\x1b[1mcase\x1b[0m %s/", currtest->name);
 	for (p = currcase;p->parent;p = p->parent)
 		;
 
 	for (;p->child;p = p->child)
-		fprintf(stdout, "%s" "\x1b[0m" "/",
+		fprintf(stdout, "%s\x1b[0m/",
 			p->name);
 
-	fprintf(stdout, "\x1b[1m" "%s" "\x1b[0m" " (%s:%u):\n",
+	fprintf(stdout, "\x1b[1m%s\x1b[0m (%s:%u):\n",
 		p->name, p->file, p->line);
 }
 
@@ -220,7 +233,7 @@ union object_ptr {
 static
 void fire_event(int event) {
 	union object_ptr p;
-	for (p.ptr = (void*)&__start_test;p.test < currtest;) {
+	for (p.ptr = (void *)&__start_test;p.test < currtest;) {
 		switch (p.header->type) {
 		case test_object_id_suite:
 			++p.suite;
@@ -240,10 +253,14 @@ void fire_event(int event) {
 	}
 }
 
-int main(int argc, char **argv) {
+#ifdef __GNUC__
+/* FIXME: So... I don't know why I really got these errors. */
+__attribute__((no_sanitize_undefined))
+#endif
+int main(int argc, char **argv)
+{
 	enum { test_suite, test_total, test_passed, test_failed, test_skipped, test_result_count };
 	unsigned stat[test_result_count] = {0};
-	char **X = isatty(STDOUT_FILENO) ? TERMINAL : NORMAL;
 	union object_ptr p;
 	int width = 0;
 #ifndef TEST_NOGATHEROUTPUT
@@ -256,6 +273,7 @@ int main(int argc, char **argv) {
 #ifndef TEST_NOLIBSEGFAULT
 	void *dlhandle; /* Handle fo libSegFault */
 #endif
+	struct winsize ws;
 
 	sighandler_init();
 
@@ -266,12 +284,15 @@ int main(int argc, char **argv) {
 		perror("dlopen");
 #endif
 
-	if (-1 == (nullfd = open("/dev/null", O_WRONLY)))
+	if (-1 == (nullfd = open("/dev/null", O_WRONLY | O_CLOEXEC)))
 		perror("open");
+
+	ws.ws_col = 72;
+	ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
-	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
+	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		int len;
 
 		switch (p.header->type) {
@@ -279,7 +300,7 @@ int main(int argc, char **argv) {
 			currsuite = p.suite;
 			++stat[test_suite];
 
-			len = strlen(currsuite->name) + strlen(currsuite->file) + OUTPUT_HUMAN_SUITE_MINLEN;
+			len = strlen(currsuite->name) + strlen(currsuite->file) + OUTPUT_SUITE_MINLEN;
 			if (len > width)
 				width = len;
 
@@ -295,7 +316,7 @@ int main(int argc, char **argv) {
 			if (currsuite)
 				++currsuite->num_tests;
 
-			len = strlen(p.test->name) + OUTPUT_HUMAN_TEST_MINLEN;
+			len = strlen(p.test->name) + OUTPUT_TEST_MINLEN;
 			if (len > width)
 				width = len;
 
@@ -306,8 +327,9 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	if (width > 72)
-		width = 72;
+	/* Fcking reponsible design. */
+	if (width >= ws.ws_col * 4 / 5)
+		width = ws.ws_col;
 
 	fprintf(stdout, "running %u tests\n",
 			stat[test_total]);
@@ -322,7 +344,7 @@ int main(int argc, char **argv) {
 	}
 
 	currsuite = NULL;
-	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
+	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		int argi;
 		int skip;
 #ifdef TEST_NOFORK
@@ -334,8 +356,7 @@ int main(int argc, char **argv) {
 		case test_object_id_suite:
 			/* Suite start marker. */
 			currsuite = p.suite;
-			fprintf(stdout, "\nsuite " "\x1b[1m" "%s" "\x1b[0m" " (%s):\n",
-					currsuite->name, currsuite->file);
+			test_print_suite_path();
 			print_hline(width, '-');
 			++p.suite;
 			goto next_test;
@@ -350,9 +371,9 @@ int main(int argc, char **argv) {
 			__builtin_unreachable();
 		}
 
-		fprintf(stdout, "test " "\x1b[1m" "%s" "\x1b[0m" " ... %*s",
+		fprintf(stdout, "test \x1b[1m%s\x1b[0m ... %*s",
 			currtest->name,
-			width - OUTPUT_HUMAN_TEST_MINLEN - (int)strlen(currtest->name), "");
+			width - OUTPUT_TEST_MINLEN - (int)strlen(currtest->name), "");
 		fflush(stdout);
 
 		for (skip = 0, argi = 1;argi < argc;++argi) {
@@ -379,7 +400,7 @@ int main(int argc, char **argv) {
 		if (skip || 0 == currtest->iters) {
 test_skip:
 			++stat[test_skipped];
-			fprintf(stdout, "\x1b[1;34m" "skipped" "\x1b[0m" "\n");
+			fprintf(stdout, "\x1b[1;34mskipped\x1b[0m\n");
 			goto drop_output;
 		}
 
@@ -391,7 +412,7 @@ test_skip:
 
 		*shm_total_ns = -1;
 
-		if (!currsuite->setup_ran) {
+		if (currsuite && !currsuite->setup_ran) {
 			currsuite->setup_ran = 1;
 			fire_event(test_event_setup_suite);
 		}
@@ -404,9 +425,9 @@ test_skip:
 #endif
 
 #ifndef TEST_NOFORK
-		if (!test_fork_(*currtest)) {
+		if (!_test_fork_(*currtest)) {
 #else
-		if (!test_fork_(fake_test_env)) {
+		if (!_test_fork_(fake_test_env)) {
 #endif
 			struct timespec ts_test_start;
 			struct timespec ts_test_end;
@@ -453,14 +474,14 @@ test_skip:
 						nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
 
 				++stat[test_passed];
-				fprintf(stdout, "\x1b[1;32m" "ok" "\x1b[0m" ", %s\n", info);
+				fprintf(stdout, "\x1b[1;32mok\x1b[0m, %s\n", info);
 					goto drop_output;
 			}
 			case EXIT_SKIP: /* Special exit code. */
 				goto test_skip;
 			default: { /* Others. */
 			test_failed:
-				fprintf(stdout, "\x1b[1;31m" "FAILED" "\x1b[0m" "\n");
+				fprintf(stdout, "\x1b[1;31mFAILED\x1b[0m\n");
 					++stat[test_failed];
 
 #ifdef TEST_NOGATHEROUTPUT
@@ -492,7 +513,7 @@ next_test:
 
 #ifndef TEST_NOGATHEROUTPUT
 	print_hline(width, '=');
-	for (p.ptr = (void*)&__start_test;p.ptr < &__stop_test;) {
+	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		switch (p.header->type) {
 		case test_object_id_suite:
 			++p.suite;
@@ -525,11 +546,11 @@ next_test:
 	if (gathered)
 		print_hline(width, '=');
 	fprintf(stdout,
-		"\x1b[1m" "test result" "\x1b[0m" ": " "\x1b[1m" "%s" "\x1b[0m" ". "
-		"\x1b[32m" "%u passed"  "\x1b[0m" "; "
-		"\x1b[31m" "%u failed"  "\x1b[0m" "; "
-		"\x1b[34m" "%u skipped" "\x1b[0m" "\n",
-		0 == stat[test_failed] ? "\x1b[32m" "ok" : "\x1b[31m" "FAILED",
+		"\x1b[1mtest result\x1b[0m: \x1b[1m%s\x1b[0m. "
+		"\x1b[1;32m%u\x1b[0;32m passed\x1b[0m; "
+		"\x1b[1;31m%u\x1b[0;31m failed\x1b[0m; "
+		"\x1b[1;34m%u\x1b[0;34m skipped\x1b[0m\n",
+		0 == stat[test_failed] ? "\x1b[1;32mOK" : "\x1b[1;31mFAILED",
 		stat[test_passed],
 		stat[test_failed],
 		stat[test_skipped]);

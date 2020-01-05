@@ -17,6 +17,8 @@
 #ifndef TEST_H
 #define TEST_H
 
+#undef _GNU_SOURCE
+#define _GNU_SOURCE
 #include <alloca.h> /* alloca */
 #include <fcntl.h> /* O_WRONLY */
 #include <setjmp.h> /* setjmp, longjmp */
@@ -39,63 +41,53 @@ extern struct test_suite_info *currsuite;
 extern struct test_test_info *currtest;
 extern struct test_case_info *currcase;
 
-#define BENCHIFND_(static_rtype, id, name, repeat) \
-	static_rtype id(void); \
-	TEST_VAR_(test, id) = {{test_object_id_test}, name, __FILE__, __LINE__, id, repeat, -1, 0, EXIT_SUCCESS}; \
-	static_rtype id(void)
-
-/* Mothers of everything. */
-#define BENCHIFND(id, name, repeat, cond) \
-	BENCHIFND_(void, id, name, !!(cond) * repeat)
-
-#define BENCHND(id, name, repeat) \
-	BENCHIFND(id, name, repeat, 1)
-
-#define TESTIFND(id, name, cond) \
-	BENCHIFND(id, name, 1, cond)
-
-#define TESTND(id, name, cond) \
-	TESTIFND(id, name, cond)
-
-/* Must be static, because we can't generate unique names. */
-#define BENCHIFD(name, repeat, cond) \
-	BENCHIFND_(static void, TOKENPASTE(test_at_line_, __LINE__), name, !!(cond) * repeat)
-
-#define BENCHD(name, repeat) \
-	BENCHIFD(name, repeat, 1)
-
-#define TESTIFD(name, cond) \
-	BENCHIFD(name, 1, cond)
-
-#define TESTD(name) \
-	TESTIFD(#name, 1)
-
-#define BENCHIF(id, repeat, cond) \
-	BENCHIFND(id, #id, repeat, cond)
-
-#define BENCH(id, repeat) \
-	BENCHIF(id, repeat, 1)
-
-#define TESTIF(id, cond) \
-	BENCHIF(id, 1, cond)
-
-#define TEST(id) \
-	TESTIF(id, 1)
-
-/* Have to hack with rtype, because empty macro argument is not valid. */
-
-#define CASE(id) \
-	CASED(#id)
-
 enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code_nonfatal_failur };
 
 #ifndef TEST_NOFORK
-#define test_fork_(obj) test_fork(&(obj).result)
+#define _test_fork_(obj) test_fork(&(obj).result)
 #else
-#define test_fork_(obj) setjmp((obj).env)
+#define _test_fork_(obj) setjmp((obj).env)
 #endif
 
-#define CASED(casename) \
+#define suite(name) \
+	test_build_suite_(#name)
+
+#define suite_file \
+	test_build_suite_("")
+
+#define test_build_suite_(name) \
+	_test_var_(suite, suite) = {{test_object_id_suite}, name, __FILE__, __LINE__, 0, 0};
+
+#define test(name) \
+	_test_build_test_(#name, 1)
+
+#define test_if(name, cond) \
+	_test_build_test_(#name, !!(cond))
+
+#define bench(name, repeat) \
+	_test_build_test_(#name, repeat)
+
+#define bench_if(name, repeat, cond) \
+	_test_build_test_(#name, (cond) ? (repeat) : 0)
+
+#define _test_build_test_(name, repeat) \
+	_test_build_test__(TOKENPASTE(test_line_, __LINE__), name, repeat)
+
+#define _test_build_test__(func, name, repeat) \
+	static void func(void); \
+	_test_var_(test, func) = { \
+		{test_object_id_test}, \
+		name, \
+		__FILE__, __LINE__, \
+		func, \
+		repeat, \
+		-1, \
+		0, \
+		EXIT_SUCCESS \
+	}; \
+	static void func(void)
+
+#define Case(casename) \
 	if (currcase) { \
 		if (!currcase->child) { \
 			currcase->child = alloca(sizeof(struct test_case_info)); \
@@ -106,14 +98,14 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 		currcase = alloca(sizeof(struct test_case_info)); \
 		currcase->parent = NULL; \
 	} \
-	currcase->name = (casename); \
+	currcase->name = (#casename); \
 	currcase->file = __FILE__; \
 	currcase->line = __LINE__; \
 	currcase->child = NULL; \
 	currcase->result = EXIT_SUCCESS; \
 	currcase->outlen = lseek(currtest->outfd, 0, SEEK_CUR); \
 \
-	if (!test_fork_(*currcase)) { \
+	if (!_test_fork_(*currcase)) { \
 		test_print_case_path(); \
 		goto TOKENPASTE(test_case_run_, __LINE__); \
 	} else { \
@@ -137,17 +129,8 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 	} \
 	for (;0;test_exit(currcase->result)) TOKENPASTE(test_case_run_, __LINE__):
 
-#define TEST_VAR_(type, id) \
+#define _test_var_(type, id) \
 	static struct test_##type##_info test_##id __attribute__((no_reorder, __used__, unused, __section__("test"))) \
-
-#define SUITE(id) \
-	SUITED(#id)
-
-#define SUITED(name) \
-	SUITE_(name)
-
-#define SUITE_(name) \
-	TEST_VAR_(suite, suite) = {{test_object_id_suite}, name, __FILE__, 0, 0};
 
 enum test_object_id {
 	test_object_id_suite,
@@ -191,7 +174,7 @@ enum test_event {
 
 #define HOOK__SCOPE___(scope, id) \
 	static void id(int); \
-	TEST_VAR_(hook, id) = {{test_object_id_hook}, id, scope}; \
+	_test_var_(hook, id) = {{test_object_id_hook}, id, scope}; \
 	static void id(int event)
 
 #define STRINGIFY(t) #t
@@ -212,20 +195,20 @@ enum test_event {
 #define TEST_SUCCESS_FORMAT_TEMPLATE_(test) \
 	TEST_FAILURE_LOCFMT_ "\x1b[32m" test##NOUN_ "\x1b[0m" " %s passed.\n"
 #define TEST_FAILURE_FORMAT_TEMPLATE_(test) \
-	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed.\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s \x1b[1;31mfailed\x1b[0m.\n"
 #define TEST_FAILURE_FORMAT_CMPTWO_TEMPLATE_(test, fmt) \
-	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed; left=" fmt ", right=" fmt ".\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s \x1b[1;31mfailed\x1b[0m\n  left=" fmt ";\n  right=" fmt ".\n"
 #define TEST_FAILURE_FORMAT_CMPONE_TEMPLATE_(test, fmt) \
-	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s failed; got " fmt ".\n"
+	TEST_FAILURE_LOCFMT_ "\x1b[1;31m" test##NOUN_ "\x1b[0m" " %s \x1b[1;31mfailed\x1b[0m; got " fmt ".\n"
 
 #define TEST_FAILURE_FORMAT_CMPSEL_(test, type, kind) \
-	__builtin_choose_expr(test_istype_(type, char *) || test_istype_(type, char[]), \
+	__builtin_choose_expr(_test_istype_(type, char *) || _test_istype_(type, char[]), \
 	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "\"%s\""), \
-	__builtin_choose_expr(test_istype_(type, char), \
+	__builtin_choose_expr(_test_istype_(type, char), \
 	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "'%c'"), \
-	__builtin_choose_expr(test_istype_(type, double) || test_istype_(type, float), \
+	__builtin_choose_expr(_test_istype_(type, double) || _test_istype_(type, float), \
 	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%f"), \
-	__builtin_choose_expr(test_istype_(type, void *), \
+	__builtin_choose_expr(_test_istype_(type, void *), \
 	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%p"), \
 	                      TEST_FAILURE_FORMAT_CMP##kind##_TEMPLATE_(test, "%d")))))
 
@@ -235,13 +218,13 @@ enum test_event {
 		test##FAILURE_(EXIT_FAILURE); \
 	} \
 
-#define test_istype_(val, type) \
+#define _test_istype_(val, type) \
 	__builtin_types_compatible_p(__typeof__(val), type)
 
 #define test_cmp_(lhs, rhs) \
-	__builtin_choose_expr(test_istype_(lhs, char *) || test_istype_(lhs, char[]), \
-	                      (0 == strcmp((char *)(size_t)lhs, (char *)(size_t)rhs)), \
-	                      (lhs == rhs))
+	__builtin_choose_expr(_test_istype_(lhs, char *) || _test_istype_(lhs, char[]) || _test_istype_(lhs, char (*)[]), \
+	                      (0 == strcmp((char const*)(size_t)lhs, (char const*)(size_t)rhs)), \
+	                      (lhs == (__typeof__(lhs))rhs))
 
 #define test_equal_(test, lhs, rhs) \
 do { \
@@ -304,6 +287,7 @@ struct test_suite_info {
 	struct test_info_header const header;
 	char const *const name;
 	char const *const file;
+	unsigned const line;
 	unsigned num_tests;
 	int setup_ran;
 } __attribute__((aligned(64)));
@@ -318,7 +302,7 @@ struct test_test_info {
 	struct test_info_header const header;
 	char const *const name;
 	char const *const file;
-	unsigned line;
+	unsigned const line;
 	void(*const run)(void);
 	unsigned long iters;
 	int outfd;
