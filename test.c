@@ -19,50 +19,53 @@
 #undef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
-# include <dlfcn.h> /* dlopen */
+# include <dlfcn.h>
 #endif
-#include <execinfo.h> /* backtrace, backtrace_symbols_fd */
-#include <limits.h> /* LONG_MAX */
-#include <signal.h> /* signal */
-#include <sys/mman.h> /* memfd_create */
-#include <time.h> /* clock_gettime */
-#include <sys/ioctl.h> /* terminal ioctl */
-#include <errno.h> /* errno */
+#include <execinfo.h>
+#include <limits.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <regex.h>
 
 #include "test.h"
 
 #define OUTPUT_SUITE_MINLEN (5 + 4)
 #define OUTPUT_TEST_MINLEN (5 + 5 + 11)
 
+/* Provided by linker. If not, use "test.ld" linker script.  */
 extern char __start_test;
 extern char __stop_test;
 
-struct test_suite_info *currsuite = NULL;
-struct test_test_info *currtest = NULL;
-struct test_case_info *currcase = NULL;
-
-/* Free variable. */
-__attribute__((nonnull, unused)) static
-void varfree(char *const*const var) {
-	free(*var);
-}
+struct _test_shared *_test_shared;
+struct _test_suite_info defaultsuite;
+struct _test_suite_info *currsuite = NULL;
+struct _test_test_info *currtest = NULL;
+struct _test_case_info *currcase = NULL;
 
 #define US_NS 1000ul
 #define MS_NS 1000000ul
 #define SEC_NS 1000000000ul
 
+#ifndef CLOCK_MONOTONIC_RAW
+#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
+
 #ifndef TEST_NOFORK
-int test_fork(int *result) {
+int test_fork(int *exitcode) {
 	switch (fork()) {
 	case 0: return 0;
 	case -1:
 		perror("fork");
-		exit(EXIT_FAILURE);
+		_exit(127);
 	default: {
 		int stat_val;
 		wait(&stat_val);
-		*result = WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE;
+		*exitcode = WIFEXITED(stat_val) ? WEXITSTATUS(stat_val) : EXIT_FAILURE;
 		return 1;
 	}
 	}
@@ -71,9 +74,9 @@ int test_fork(int *result) {
 
 void test_exit(int code) {
 #ifndef TEST_NOFORK
-	exit(code);
+	_exit(code);
 #else
-	*(currcase ? &currcase->result : &currtest->result) = code;
+	*(currcase ? &currcase->exitcode : &currtest->exitcode) = code;
 	longjmp(currcase ? currcase->env : test_test_env, code + 1);
 #endif
 }
@@ -92,15 +95,14 @@ void cat(int fd) {
 	ssize_t plen;
 	off_t offset;
 
-	for (offset = 0;plen = len, (len = pread(fd, buf, sizeof(buf), offset)) > 0;offset += len) {
-		while (-1 == write(STDERR_FILENO, buf, len)) {
+	for (offset = 0;plen = len, (len = pread(fd, buf, sizeof buf, offset)) > 0;offset += len) {
+		while (-1 == write(STDOUT_FILENO, buf, len)) {
 			if (EAGAIN == errno)
 				continue;
 
 			perror("write");
 			break;
 		}
-
 	}
 
 	if (0 == plen || buf[plen - 1] != '\n')
@@ -108,30 +110,20 @@ void cat(int fd) {
 	fputc('\n', stderr);
 }
 
-/** Return a time unit that makes sense for human beings. */
-__attribute__((const)) static
-unsigned long nstohtime(unsigned long ns) {
-	if (ns < 10 * US_NS)
-		return ns;
-	else if (ns < 10 * MS_NS)
-		return ns / US_NS;
-	else if (ns < 10 * SEC_NS)
-		return ns / MS_NS;
-	else
-		return ns / SEC_NS;
-}
+static unsigned time_base;
+static char const*time_unit;
 
-/** Return time value that matches with human time unit. */
- __attribute__((returns_nonnull, const)) static
-char const *nstohunit(unsigned long ns) {
+/** Return a time unit that makes sense for human beings. */
+static
+void normalize_time(unsigned long ns) {
 	if (ns < 10 * US_NS)
-		return "ns";
+		time_base = ns, time_unit = "ns";
 	else if (ns < 10 * MS_NS)
-		return "us";
+		time_base = ns / US_NS, time_unit = "us";
 	else if (ns < 10 * SEC_NS)
-		return "ms";
+		time_base = ns / MS_NS, time_unit = "ms";
 	else
-		return "s";
+		time_base = ns / SEC_NS, time_unit = "s ";
 }
 
 /** Return time in nanoseconds. */
@@ -142,7 +134,7 @@ unsigned long tstons(struct timespec const *const ts) {
 
 /** Compute elapsed time from `start` time to `end` time. Write result into `result`. */
 static
-void tsdiff(struct timespec const *end, struct timespec const *start, struct timespec *result) {
+void tssub(struct timespec *result, struct timespec const *end, struct timespec const *start) {
 	result->tv_sec  = end->tv_sec  - start->tv_sec  + (end->tv_nsec < start->tv_nsec);
 	result->tv_nsec = end->tv_nsec - start->tv_nsec + (end->tv_nsec < start->tv_nsec ? SEC_NS : 0);
 }
@@ -157,7 +149,7 @@ void print_hline(int n, char ch) {
 	fputc('\n', stdout);
 }
 
-void test_print_suite_path(void) {
+void _test_print_suite_path(void) {
 	if (strlen(currsuite->name) > 0)
 		fprintf(stdout, "\nsuite \x1b[1m%s\x1b[0m (%s:%u):\n",
 			currsuite->name, currsuite->file, currsuite->line);
@@ -166,17 +158,18 @@ void test_print_suite_path(void) {
 			currsuite->name, currsuite->file);
 }
 
-void test_print_test_path(void) {
+void _test_print_test_path(void) {
 	fprintf(stdout, "\x1b[1mtest %s\x1b[0m (%s:%u):\n",
 		currtest->name, currtest->file, currtest->line);
 }
 
-void test_print_case_path(void) {
-	struct test_case_info *p;
+void _test_print_case_path(void) {
+	struct _test_case_info *p = currcase;
+
+	while (p->parent)
+		p = p->parent;
 
 	fprintf(stdout, "\x1b[1mcase\x1b[0m %s/", currtest->name);
-	for (p = currcase;p->parent;p = p->parent)
-		;
 
 	for (;p->child;p = p->child)
 		fprintf(stdout, "%s\x1b[0m/",
@@ -224,15 +217,16 @@ void sighandler_init(void) {
 
 union object_ptr {
 	void *ptr;
-	struct test_info_header *header;
-	struct test_suite_info *suite;
-	struct test_hook_info *hook;
-	struct test_test_info *test;
+	struct _test_info_header *header;
+	struct _test_suite_info *suite;
+	struct _test_hook_info *hook;
+	struct _test_test_info *test;
 };
 
 static
-void fire_event(int event) {
+void emit_event(int event) {
 	union object_ptr p;
+
 	for (p.ptr = (void *)&__start_test;p.test < currtest;) {
 		switch (p.header->type) {
 		case test_object_id_suite:
@@ -240,7 +234,7 @@ void fire_event(int event) {
 			break;
 		case test_object_id_hook:
 			if (2/*global*/ == p.hook->scope ||
-			   (1/*suite */ == p.hook->scope && p.suite >= currsuite))
+			   (1/*suite */ == p.hook->scope && p.suite >= currsuite && currsuite != &defaultsuite))
 				p.hook->hook(event);
 			++p.hook;
 			continue;
@@ -259,50 +253,43 @@ __attribute__((no_sanitize_undefined))
 #endif
 int main(int argc, char **argv)
 {
-	enum { test_suite, test_total, test_passed, test_failed, test_skipped, test_result_count };
+	enum { test_suite, test_total, test_passed, test_failed, test_ignored, test_result_count };
 	unsigned stat[test_result_count] = {0};
 	union object_ptr p;
-	int width = 0;
+	int print_width = 30;
 #ifndef TEST_NOGATHEROUTPUT
 	int gathered = 0;
 #endif
-	unsigned long *shm_total_ns;
-	struct timespec ts_start;
-	struct timespec ts_end;
-	int nullfd;
+	struct timespec ts_start, ts_end;
 #ifndef TEST_NOLIBSEGFAULT
-	void *dlhandle; /* Handle fo libSegFault */
+	void *libsegfault;
 #endif
-	struct winsize ws;
 
 	sighandler_init();
 
 #ifndef TEST_NOLIBSEGFAULT
-	dlhandle = dlopen("/lib/libSegFault.so", RTLD_LAZY);
-	if (!dlhandle)
-		/* Don't treat it fatal error. */
+	if (NULL == (libsegfault = dlopen("/lib/libSegFault.so", RTLD_LAZY)))
 		perror("dlopen");
 #endif
 
-	if (-1 == (nullfd = open("/dev/null", O_WRONLY | O_CLOEXEC)))
-		perror("open");
+	clock_gettime(CLOCK_MONOTONIC_RAW, &ts_start);
 
-	ws.ws_col = 72;
-	ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-
-	clock_gettime(CLOCK_MONOTONIC, &ts_start);
-
+	currtest = NULL;
+	currsuite = &defaultsuite;
 	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		int len;
 
 		switch (p.header->type) {
 		case test_object_id_suite:
+			if (NULL != currtest)
+				currtest->last_in_suite = 1;
+
 			currsuite = p.suite;
 			++stat[test_suite];
 
 			len = strlen(currsuite->name) + strlen(currsuite->file) + OUTPUT_SUITE_MINLEN;
-			if (len > width)
-				width = len;
+			if (len > print_width)
+				print_width = len;
 
 			++p.suite;
 			break;
@@ -310,15 +297,12 @@ int main(int argc, char **argv)
 			++p.hook;
 			continue;
 		case test_object_id_test:
+			currtest = p.test;
 			++stat[test_total];
 
-			/* Count tests in suites. */
-			if (currsuite)
-				++currsuite->num_tests;
-
 			len = strlen(p.test->name) + OUTPUT_TEST_MINLEN;
-			if (len > width)
-				width = len;
+			if (len > print_width)
+				print_width = len;
 
 			++p.test;
 			break;
@@ -326,24 +310,31 @@ int main(int argc, char **argv)
 			__builtin_unreachable();
 		}
 	}
+	if (NULL != currtest)
+		currtest->last_in_suite = 1;
 
-	/* Fcking reponsible design. */
-	if (width >= ws.ws_col * 4 / 5)
-		width = ws.ws_col;
+	{
+		struct winsize ws;
+		ws.ws_col = 72;
+		(void)ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+
+		if (print_width >= ws.ws_col * 4 / 5)
+			print_width = ws.ws_col;
+	}
 
 	fprintf(stdout, "running %u tests\n",
 			stat[test_total]);
 
-	shm_total_ns = mmap(NULL, sizeof(*shm_total_ns),
+	_test_shared = mmap(NULL, sizeof *_test_shared,
 		PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
-	if (MAP_FAILED == shm_total_ns) {
+	if (MAP_FAILED == _test_shared) {
 		perror("mmap");
-		exit(EXIT_FAILURE);
+		exit(127);
 	}
 
-	currsuite = NULL;
+	currsuite = &defaultsuite;
 	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		int argi;
 		int skip;
@@ -356,10 +347,13 @@ int main(int argc, char **argv)
 		case test_object_id_suite:
 			/* Suite start marker. */
 			currsuite = p.suite;
-			test_print_suite_path();
-			print_hline(width, '-');
+			_test_print_suite_path();
+			print_hline(print_width, '-');
+
+			emit_event(test_event_setup_suite);
+
 			++p.suite;
-			goto next_test;
+			continue;
 		case test_object_id_hook:
 			++p.hook;
 			continue;
@@ -373,19 +367,23 @@ int main(int argc, char **argv)
 
 		fprintf(stdout, "test \x1b[1m%s\x1b[0m ... %*s",
 			currtest->name,
-			width - OUTPUT_TEST_MINLEN - (int)strlen(currtest->name), "");
+			print_width - OUTPUT_TEST_MINLEN - (int)strlen(currtest->name), "");
 		fflush(stdout);
 
 		for (skip = 0, argi = 1;argi < argc;++argi) {
-			char *filter = argv[argi];
-			int should_skip = 0;
+			char *pattern = argv[argi];
+			regex_t reg;
+			int should_skip;
+			int ret;
 
-			switch (filter[0]) {
+			switch (*pattern) {
 			case '+':
-				++filter;
+				++pattern;
+			default:
+				should_skip = 0;
 				break;
 			case '-':
-				++filter;
+				++pattern;
 				should_skip = 1;
 				break;
 			}
@@ -393,31 +391,34 @@ int main(int argc, char **argv)
 			if (1 == argi)
 				skip = !should_skip;
 
-			if (strstr(currtest->name, filter))
+			if (0 != (ret = regcomp(&reg, pattern, REG_EXTENDED | REG_ICASE | REG_NOSUB))) {
+				char buf[100];
+				regerror(ret, &reg, buf, sizeof buf);
+				fprintf(stderr, "test: failed to compile pattern \"%s\": %s\n", pattern, buf);
+				exit(127);
+			}
+
+			if (0 == regexec(&reg, currtest->name, 0, NULL, 0))
 				skip = should_skip;
+
+			regfree(&reg);
 		}
 
 		if (skip || 0 == currtest->iters) {
-test_skip:
-			++stat[test_skipped];
-			fprintf(stdout, "\x1b[1;34mskipped\x1b[0m\n");
+			++stat[test_ignored];
+			fprintf(stdout, "\x1b[34mignored\x1b[0m\n");
 			goto drop_output;
 		}
 
-		currtest->outfd = memfd_create(currtest->name, 0);
+		currtest->outfd = memfd_create(currtest->name, MFD_CLOEXEC);
 		if (-1 == currtest->outfd) {
 			perror("memfd_create");
-			exit(EXIT_FAILURE);
+			exit(127);
 		}
 
-		*shm_total_ns = -1;
+		_test_shared->total_ns = -1;
 
-		if (currsuite && !currsuite->setup_ran) {
-			currsuite->setup_ran = 1;
-			fire_event(test_event_setup_suite);
-		}
-
-		fire_event(test_event_setup_test);
+		emit_event(test_event_setup_test);
 
 #ifdef TEST_NOFORK
 		oldstderr = dup(STDERR_FILENO);
@@ -431,88 +432,82 @@ test_skip:
 #endif
 			struct timespec ts_test_start;
 			struct timespec ts_test_end;
-			unsigned iters = currtest->iters;
+			unsigned long iters = currtest->iters;
 
 			dup2(currtest->outfd, STDERR_FILENO);
 			setvbuf(stderr, NULL, _IONBF, 0);
 			dup2(currtest->outfd, STDOUT_FILENO);
 			setvbuf(stdout, NULL, _IONBF, 0);
-			clock_gettime(CLOCK_MONOTONIC, &ts_test_start);
+			clock_gettime(CLOCK_MONOTONIC_RAW, &ts_test_start);
 
 			while (iters-- > 0)
 				currtest->run();
 
-			clock_gettime(CLOCK_MONOTONIC, &ts_test_end);
-			tsdiff(&ts_test_end, &ts_test_start, &ts_test_start);
-			*shm_total_ns = tstons(&ts_test_start);
+			clock_gettime(CLOCK_MONOTONIC_RAW, &ts_test_end);
+			tssub(&ts_test_start, &ts_test_end, &ts_test_start);
+			_test_shared->total_ns = tstons(&ts_test_start);
 
-			test_exit(currtest->result);
+			test_exit(currtest->exitcode);
 		} else {
 #ifdef TEST_NOFORK
 			dup2(oldstderr, STDERR_FILENO);
 			dup2(oldstdout, STDOUT_FILENO);
 #endif
 
-			switch (currtest->result) {
+			switch (currtest->exitcode) {
 			case EXIT_SUCCESS: {
-				char info[66];
-				if (-1 == *shm_total_ns)
+				char info[50];
+
+				currtest->total_ns = _test_shared->total_ns;
+
+				if (-1 == currtest->total_ns)
 					goto test_failed;
 
-				currtest->total_ns = *shm_total_ns;
+				normalize_time(currtest->total_ns);
+				sprintf(info, "%4u %s", time_base, time_unit);
 
-				if (currtest->iters == 1)
-					snprintf(info, sizeof info, "%4lu %s",
-						nstohtime(currtest->total_ns),
-						nstohunit(currtest->total_ns));
-				else
-					snprintf(info, sizeof info, "%4lu %s / %9lu iters = %4lu %s/iter",
-						nstohtime(currtest->total_ns),
-						nstohunit(currtest->total_ns),
+				if (currtest->iters > 1) {
+					normalize_time((currtest->total_ns + currtest->iters - 1) / currtest->iters);
+					sprintf(info + strlen(info), " / %9lu iters = %4u %s/iter",
 						currtest->iters,
-						nstohtime((currtest->total_ns + currtest->iters - 1) / currtest->iters),
-						nstohunit((currtest->total_ns + currtest->iters - 1) / currtest->iters));
+						time_base,
+						time_unit);
+				}
 
 				++stat[test_passed];
 				fprintf(stdout, "\x1b[1;32mok\x1b[0m, %s\n", info);
-					goto drop_output;
+				goto drop_output;
 			}
-			case EXIT_SKIP: /* Special exit code. */
-				goto test_skip;
-			default: { /* Others. */
+			case EXIT_SKIP:
+				++stat[test_ignored];
+				fprintf(stdout, "\x1b[1;34mskipped\x1b[0m\n");
+				goto drop_output;
+			default: {
 			test_failed:
 				fprintf(stdout, "\x1b[1;31mFAILED\x1b[0m\n");
 					++stat[test_failed];
 
 #ifdef TEST_NOGATHEROUTPUT
-					cat(currtest->outfd);
+				cat(currtest->outfd);
 #else
-					goto next_test; /* Keep output. */
+				goto keep_output;
 #endif
 			}
 			}
 		}
 
-drop_output:
+	drop_output:
 		close(currtest->outfd);
 		currtest->outfd = -1;
-next_test:
-		fire_event(test_event_teardown_test);
+	keep_output:
+		emit_event(test_event_teardown_test);
 
-		if (currsuite) {
-			if (0 == currsuite->num_tests) {
-				if (currsuite->setup_ran)
-					fire_event(test_event_teardown_suite);
-			} else {
-				--currsuite->num_tests;
-			}
-		}
+		if (currtest->last_in_suite)
+			emit_event(test_event_teardown_suite);
 	}
 
-	munmap(shm_total_ns, sizeof(*shm_total_ns));
-
 #ifndef TEST_NOGATHEROUTPUT
-	print_hline(width, '=');
+	print_hline(print_width, '=');
 	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
 		switch (p.header->type) {
 		case test_object_id_suite:
@@ -525,7 +520,7 @@ next_test:
 			if (-1 != p.test->outfd) {
 				gathered = 1;
 				currtest = p.test;
-				test_print_test_path();
+				_test_print_test_path();
 				cat(p.test->outfd);
 
 				close(p.test->outfd);
@@ -540,23 +535,27 @@ next_test:
 	}
 #endif
 
-	clock_gettime(CLOCK_MONOTONIC, &ts_end);
-	tsdiff(&ts_end, &ts_start, &ts_start);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &ts_end);
+	tssub(&ts_start, &ts_end, &ts_start);
+	normalize_time(ts_start.tv_sec * SEC_NS + ts_start.tv_nsec);
 
 	if (gathered)
-		print_hline(width, '=');
+		print_hline(print_width, '=');
 	fprintf(stdout,
-		"\x1b[1mtest result\x1b[0m: \x1b[1m%s\x1b[0m. "
+		"%*s%10ld assertions, %4u %s\n"
+		"\x1b[0;1mtest result\x1b[0m: \x1b[1m%s\x1b[0m. "
 		"\x1b[1;32m%u\x1b[0;32m passed\x1b[0m; "
 		"\x1b[1;31m%u\x1b[0;31m failed\x1b[0m; "
-		"\x1b[1;34m%u\x1b[0;34m skipped\x1b[0m\n",
+		"\x1b[1;34m%u\x1b[0;34m ignored\x1b[0m\n",
+		print_width - 30, "", _test_shared->num_assertions, time_base, time_unit,
 		0 == stat[test_failed] ? "\x1b[1;32mOK" : "\x1b[1;31mFAILED",
 		stat[test_passed],
 		stat[test_failed],
-		stat[test_skipped]);
+		stat[test_ignored]);
 
+	munmap(_test_shared, sizeof *_test_shared);
 #ifndef TEST_NOLIBSEGFAULT
-	dlclose(dlhandle);
+	dlclose(libsegfault);
 #endif
 
 	exit(0 == stat[test_failed] ? EXIT_SUCCESS : EXIT_FAILURE);
