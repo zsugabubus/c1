@@ -14,8 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-#ifndef TEST_H
-#define TEST_H
+#ifndef _C1_TEST_H
+#define _C1_TEST_H
 
 #undef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -75,7 +75,7 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 	_TEST_BUILD_TEST_(#name, (cond) ? (repeat) : 0)
 
 #define _TEST_BUILD_TEST_(name, repeat) \
-	_TEST_BUILD_TEST__(_TEST_TOKENPASTE_(_test_func_, __LINE__), name, repeat)
+	_TEST_BUILD_TEST__(_TEST_TOKENPASTE_(_test_func_line, __LINE__), name, repeat)
 
 #define _TEST_BUILD_TEST__(func, name, repeat) \
 	static void func(void); \
@@ -88,6 +88,7 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 		-1, \
 		0, \
 		EXIT_SUCCESS \
+		0, \
 	}; \
 	static void func(void)
 
@@ -111,7 +112,7 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 \
 	if (!_test_fork_(*currcase)) { \
 		_test_print_case_path(); \
-		goto _TEST_TOKENPASTE_(_test_case_run_, __LINE__); \
+		goto _TEST_TOKENPASTE_(_test_case_run_line, __LINE__); \
 	} else { \
 		switch (currcase->exitcode) { \
 		case EXIT_SUCCESS: \
@@ -130,7 +131,7 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 		} \
 		currcase = currcase->parent; \
 	} \
-	for (;0;test_exit(currcase->exitcode)) _TEST_TOKENPASTE_(_test_case_run_, __LINE__):
+	for (;0;test_exit(currcase->exitcode)) _TEST_TOKENPASTE_(_test_case_run_line, __LINE__):
 
 #define _TEST_VAR_(type, id) \
 	static struct _test_##type##_info test_##id __attribute__((no_reorder, __used__, unused, __section__("test"))) \
@@ -180,7 +181,6 @@ enum test_event {
 	_TEST_VAR_(HOOK, func) = {{test_object_id_hook}, func, scope}; \
 	static void func(int event)
 
-#define STRINGIFY(t) #t
 #define _TEST_TOKENPASTE__(a, b) a##b
 #define _TEST_TOKENPASTE3__(a, b, c) a##b##c
 #define _TEST_TOKENPASTE_(a, b) _TEST_TOKENPASTE__(a, b)
@@ -201,8 +201,9 @@ enum test_event {
 #define _TEST_FORMAT_ONE_(test, fmt) \
 	"%s:%u: \x1b[1;31m" test##NOUN_ "\x1b[0m %s \x1b[1;31mfailed\x1b[0m; got " fmt ".\n"
 
-#define _TEST_FORMAT_(test, type, kind) \
-	__builtin_choose_expr(_TEST_ISTYPE_(type, char *) || _TEST_ISTYPE_(type, char[]), \
+#if defined(__GNUC__) || defined(clang)
+# define _TEST_FORMAT_(test, type, kind) \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, char *) || _TEST_ISTYPE_(type, char[]) || _TEST_ISTYPE_(type, char(*)[]), \
 	                      _TEST_FORMAT_##kind##_(test, "\"%s\""), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, char), \
 	                      _TEST_FORMAT_##kind##_(test, "'%c'"), \
@@ -210,25 +211,41 @@ enum test_event {
 	                      _TEST_FORMAT_##kind##_(test, "%f"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, void *), \
 	                      _TEST_FORMAT_##kind##_(test, "%p"), \
-	                      _TEST_FORMAT_##kind##_(test, "%d")))))
+	__builtin_choose_expr(_TEST_ISTYPE_(type, short), \
+	                      _TEST_FORMAT_##kind##_(test, "%h"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned short), \
+	                      _TEST_FORMAT_##kind##_(test, "%uh"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, int), \
+	                      _TEST_FORMAT_##kind##_(test, "%d"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned int), \
+	                      _TEST_FORMAT_##kind##_(test, "%u"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, long), \
+	                      _TEST_FORMAT_##kind##_(test, "%l"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned long), \
+	                      _TEST_FORMAT_##kind##_(test, "%ul"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, long long), \
+	                      _TEST_FORMAT_##kind##_(test, "%ll"), \
+	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned long long), \
+	                      _TEST_FORMAT_##kind##_(test, "%ull"), \
+	                      "<?>" \
+	                      ))))))))))))
 
-#define _TEST_COND_(test, cond, msg) \
+# define _TEST_COND_(test, cond, msg) \
 	if (++_test_shared->num_assertions, !(cond)) { \
 		fprintf(stderr, _TEST_FORMAT_FAILURE_(test), __FILE__, __LINE__, msg); \
 		test##FAILURE_(EXIT_FAILURE); \
-	} \
+	}
 
-#define _TEST_ISTYPE_(val, type) \
+# define _TEST_ISTYPE_(val, type) \
 	__builtin_types_compatible_p(__typeof__(val), type)
 
-#define _TEST_CMP__(lhs, cmp, rhs) \
+# define _TEST_CMP__(lhs, cmp, rhs) \
 	__builtin_choose_expr(_TEST_ISTYPE_(lhs, char *) || _TEST_ISTYPE_(lhs, char[]) || _TEST_ISTYPE_(lhs, char (*)[]), \
 	                      (strcmp((char const*)(size_t)lhs, (char const*)(size_t)rhs) cmp 0), \
-	                      (lhs cmp (__typeof__(lhs))rhs)/* FIXME: It can result in false positives. */)
+	                      ((lhs) cmp ((__typeof__(lhs))rhs))/* FIXME: It can result in false positives. */)
 
-#define _TEST_CMP_(test, lhs, cmp, rhs) \
-do { \
-	__typeof__(lhs) const lhsv = lhs; /* no parenthesis: ("invalid") */ \
+# define _TEST_CMP_(test, lhs, cmp, rhs) do { \
+	__typeof__(lhs) const lhsv = lhs; /* Don't put parenthesis: ("invalid") */ \
 	__typeof__(rhs) const rhsv = rhs; \
 	if (++_test_shared->num_assertions, !_TEST_CMP__(lhsv, cmp, rhsv)) { \
 		__builtin_choose_expr(__builtin_constant_p(lhs) + __builtin_constant_p(rhs) == 1, \
@@ -245,23 +262,33 @@ do { \
 	} \
 } while(0)
 
+#else
+# define _TEST_COND_(test, cond, msg) \
+	if (++_test_shared->num_assertions, !(cond)) { \
+		fprintf(stderr, _TEST_FORMAT_FAILURE_(test), __FILE__, __LINE__, msg); \
+		test##FAILURE_(EXIT_FAILURE); \
+	}
+
+# define _TEST_CMP_(test, lhs, cmp, rhs) _TEST_COND_(test, ((lhs) cmp (rhs)), #lhs " " #cmp " " #rhs)
+#endif
+
 #define assert_msg(cond, msg) _TEST_COND_(_TEST_TEST_ASSERT_, cond, msg)
 #define expect_msg(cond, msg) _TEST_COND_(_TEST_TEST_EXPECT_, cond, msg)
 
-#define assert_true(cond) _TEST_COND_(_TEST_TEST_ASSERT_, cond, "`" #cond "'")
-#define assert_null(expr) assert_true((expr) == NULL)
-#define assert_nonnull(expr) assert_true((expr) != NULL)
-#define assert_false(cond) assert_true(!(cond))
+#define assert_true(cond)    _TEST_COND_(_TEST_TEST_ASSERT_, cond,           "`"     #cond "'")
+#define assert_false(cond)   _TEST_COND_(_TEST_TEST_ASSERT_, !(cond),        "`" "!" #cond "'")
+#define assert_null(expr)    _TEST_COND_(_TEST_TEST_ASSERT_, (expr) == NULL, "`"     #expr " == NULL" "'")
+#define assert_nonnull(expr) _TEST_COND_(_TEST_TEST_ASSERT_, (expr) != NULL, "`"     #expr " != NULL" "'")
 #define assert_memequal(lhs, rhs, size) assert_equal(memcmp(lhs, rhs, size), 0);
 
-#define expect_true(cond) _TEST_COND_(_TEST_TEST_EXPECT_, cond, "`" #cond "'")
-#define expect_null(expr) expect_true((expr) == NULL)
-#define expect_nonnull(expr) expect_true((expr) != NULL)
-#define expect_false(cond) expect_true(!(cond))
+#define expect_true(cond)    _TEST_COND_(_TEST_TEST_EXPECT_,   cond,         "`"     #cond "'")
+#define expect_false(cond)   _TEST_COND_(_TEST_TEST_EXPECT_, !(cond),        "`" "!" #cond "'")
+#define expect_null(expr)    _TEST_COND_(_TEST_TEST_EXPECT_, (expr) == NULL, "`"     #expr " == NULL" "'")
+#define expect_nonnull(expr) _TEST_COND_(_TEST_TEST_EXPECT_, (expr) != NULL, "`"     #expr " != NULL" "'")
 #define expect_memequal(lhs, rhs, size) expect_equal(memcmp(lhs, rhs, size), 0);
 
-#define assert_cmp(lhs, cmp, rhs)   _TEST_CMP_(_TEST_TEST_ASSERT_, lhs, cmp, rhs)
-#define expect_cmp(lhs, cmp, rhs)   _TEST_CMP_(_TEST_TEST_EXPECT_, lhs, cmp, rhs)
+#define assert_cmp(lhs, cmp, rhs) _TEST_CMP_(_TEST_TEST_ASSERT_, lhs, cmp, rhs)
+#define expect_cmp(lhs, cmp, rhs) _TEST_CMP_(_TEST_TEST_EXPECT_, lhs, cmp, rhs)
 
 #define assert_equal(lhs, rhs)   assert_cmp(lhs, ==, rhs)
 #define expect_equal(lhs, rhs)   expect_cmp(lhs, ==, rhs)
@@ -274,7 +301,7 @@ void _test_print_suite_path(void);
 void _test_print_test_path(void);
 void _test_print_case_path(void);
 
-#define FATAL_FAILURE(code) test_exit(code);
+#define FATAL_FAILURE(code) test_exit(code)
 #define NONFATAL_FAILURE(code) do { \
 	int *result = (currcase ? &currcase->exitcode : &currtest->exitcode); \
 	if (EXIT_SUCCESS == *result) \
@@ -316,7 +343,6 @@ struct _test_test_info {
 	int last_in_suite;
 } __attribute__((aligned(64)));
 
-/** Info about test case. */
 struct _test_case_info {
 	char const *name;
 	char const *file;
@@ -333,5 +359,5 @@ struct _test_case_info {
 void test_exit(int exitcode) __attribute__((noreturn));
 int test_fork(int *exitcode) __attribute__((returns_twice));
 
-#endif /* TEST_H */
+#endif /* _C1_TEST_H */
 /* vim:set ft=c ts=4 sw=4 noet: */

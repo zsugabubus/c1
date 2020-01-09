@@ -58,7 +58,8 @@ struct _test_case_info *currcase = NULL;
 #ifndef TEST_NOFORK
 int test_fork(int *exitcode) {
 	switch (fork()) {
-	case 0: return 0;
+	case 0:
+		return 0;
 	case -1:
 		perror("fork");
 		_exit(127);
@@ -72,22 +73,32 @@ int test_fork(int *exitcode) {
 }
 #endif
 
-void test_exit(int code) {
-#ifndef TEST_NOFORK
-	_exit(code);
-#else
-	*(currcase ? &currcase->exitcode : &currtest->exitcode) = code;
-	longjmp(currcase ? currcase->env : test_test_env, code + 1);
-#endif
-}
-
 #ifdef TEST_NOFORK
 static struct {
 	jmp_buf env;
-} fake_test_env;
+} currtest_env;
 #endif
 
-/** Write content of `fd` to stderr. */
+void test_exit(int exitcode) {
+	switch (exitcode) {
+	default:
+		/* FIXME: Dunno if it has something to do with GDB but it works only for the
+		 * first fork(). */
+		raise(SIGTRAP);
+		break;
+	case EXIT_SKIP:
+	case EXIT_SUCCESS:
+		break;
+	}
+
+#ifndef TEST_NOFORK
+	_exit(exitcode);
+#else
+	*(NULL != currcase ? &currcase->exitcode : &currtest->exitcode) = exitcode;
+	longjmp(NULL != currcase ? currcase->env : currtest_env.env, exitcode + 1);
+#endif
+}
+
 static
 void cat(int fd) {
 	char buf[(1 << 13)];
@@ -106,7 +117,7 @@ void cat(int fd) {
 	}
 
 	if (0 == plen || buf[plen - 1] != '\n')
-		fputs("\x1b[7m$\x1b[0m\n", stderr);
+		fputs("\x1b[7m$\x1b[0m", stderr);
 	fputc('\n', stderr);
 }
 
@@ -159,7 +170,7 @@ void _test_print_suite_path(void) {
 }
 
 void _test_print_test_path(void) {
-	fprintf(stdout, "\x1b[1mtest %s\x1b[0m (%s:%u):\n",
+	fprintf(stdout, "test \x1b[1m%s\x1b[0m (%s:%u):\n",
 		currtest->name, currtest->file, currtest->line);
 }
 
@@ -169,7 +180,7 @@ void _test_print_case_path(void) {
 	while (p->parent)
 		p = p->parent;
 
-	fprintf(stdout, "\x1b[1mcase\x1b[0m %s/", currtest->name);
+	fprintf(stdout, "case %s/", currtest->name);
 
 	for (;p->child;p = p->child)
 		fprintf(stdout, "%s\x1b[0m/",
@@ -179,13 +190,19 @@ void _test_print_case_path(void) {
 		p->name, p->file, p->line);
 }
 
-/** Default signal handler. */
 static
 void sighandler(int sig, siginfo_t *info, void *ucontext) {
 	void *array[50];
 	int size;
 
-	psiginfo(info, "Unhandled signal");
+	(void)sig, (void)ucontext;
+
+#ifdef TEST_NOFORK
+	if (SIGTRAP == sig)
+		return;
+#endif
+
+	psiginfo(info, "\x1b[0;1;31mReceived unhandled signal\x1b[0m");
 
 	size = backtrace(array, 50);
 
@@ -195,7 +212,6 @@ void sighandler(int sig, siginfo_t *info, void *ucontext) {
 	test_exit(EXIT_FAILURE);
 }
 
-/** Initialize signal handling. */
 static
 void sighandler_init(void) {
 	static struct sigaction sa;
@@ -325,14 +341,17 @@ int main(int argc, char **argv)
 	fprintf(stdout, "running %u tests\n",
 			stat[test_total]);
 
+#ifdef TEST_NOFORK
+	_test_shared = alloca(sizeof *_test_shared);
+#else
 	_test_shared = mmap(NULL, sizeof *_test_shared,
 		PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
 	if (MAP_FAILED == _test_shared) {
 		perror("mmap");
 		exit(127);
 	}
+#endif
 
 	currsuite = &defaultsuite;
 	for (p.ptr = (void *)&__start_test;p.ptr < (void *)&__stop_test;) {
@@ -379,6 +398,7 @@ int main(int argc, char **argv)
 			switch (*pattern) {
 			case '+':
 				++pattern;
+				/* Fall through. */
 			default:
 				should_skip = 0;
 				break;
@@ -428,7 +448,7 @@ int main(int argc, char **argv)
 #ifndef TEST_NOFORK
 		if (!_test_fork_(*currtest)) {
 #else
-		if (!_test_fork_(fake_test_env)) {
+		if (!_test_fork_(currtest_env)) {
 #endif
 			struct timespec ts_test_start;
 			struct timespec ts_test_end;
@@ -458,10 +478,10 @@ int main(int argc, char **argv)
 			case EXIT_SUCCESS: {
 				char info[50];
 
-				currtest->total_ns = _test_shared->total_ns;
-
-				if (-1 == currtest->total_ns)
+				if (-1 == _test_shared->total_ns)
 					goto test_failed;
+
+				currtest->total_ns = _test_shared->total_ns;
 
 				normalize_time(currtest->total_ns);
 				sprintf(info, "%4u %s", time_base, time_unit);
