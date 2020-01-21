@@ -48,7 +48,7 @@ extern struct _test_case_info *currcase;
 enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code_nonfatal_failur };
 
 #ifndef TEST_NOFORK
-#define _test_fork_(obj) test_fork(&(obj).exitcode)
+#define _test_fork_(obj) _test_fork(&(obj).exitcode)
 #else
 #define _test_fork_(obj) setjmp((obj).env)
 #endif
@@ -87,7 +87,7 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 		repeat, \
 		-1, \
 		0, \
-		EXIT_SUCCESS \
+		EXIT_SUCCESS, \
 		0, \
 	}; \
 	static void func(void)
@@ -126,12 +126,12 @@ enum { test_return_code_passed, test_return_code_fatal_failure, test_return_code
 		default: {/* Propagate return code. */ \
 			int exitcode = currcase->exitcode; \
 			currcase = currcase->parent; \
-			test_exit(exitcode); \
+			_test_exit(exitcode); \
 		} \
 		} \
 		currcase = currcase->parent; \
 	} \
-	for (;0;test_exit(currcase->exitcode)) _TEST_TOKENPASTE_(_test_case_run_line, __LINE__):
+	for (;0;_test_exit(currcase->exitcode)) _TEST_TOKENPASTE_(_test_case_run_line, __LINE__):
 
 #define _TEST_VAR_(type, id) \
 	static struct _test_##type##_info test_##id __attribute__((no_reorder, __used__, unused, __section__("test"))) \
@@ -204,9 +204,9 @@ enum test_event {
 #if defined(__GNUC__) || defined(clang)
 # define _TEST_FORMAT_(test, type, kind) \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, char *) || _TEST_ISTYPE_(type, char[]) || _TEST_ISTYPE_(type, char(*)[]), \
-	                      _TEST_FORMAT_##kind##_(test, "\"%s\""), \
+	                      _TEST_FORMAT_##kind##_(test, "“%s”"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, char), \
-	                      _TEST_FORMAT_##kind##_(test, "'%c'"), \
+	                      _TEST_FORMAT_##kind##_(test, "‘%c’"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, double) || _TEST_ISTYPE_(type, float), \
 	                      _TEST_FORMAT_##kind##_(test, "%f"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, void *), \
@@ -214,7 +214,7 @@ enum test_event {
 	__builtin_choose_expr(_TEST_ISTYPE_(type, short), \
 	                      _TEST_FORMAT_##kind##_(test, "%h"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned short), \
-	                      _TEST_FORMAT_##kind##_(test, "%uh"), \
+	                      _TEST_FORMAT_##kind##_(test, "%hu"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, int), \
 	                      _TEST_FORMAT_##kind##_(test, "%d"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned int), \
@@ -222,11 +222,11 @@ enum test_event {
 	__builtin_choose_expr(_TEST_ISTYPE_(type, long), \
 	                      _TEST_FORMAT_##kind##_(test, "%l"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned long), \
-	                      _TEST_FORMAT_##kind##_(test, "%ul"), \
+	                      _TEST_FORMAT_##kind##_(test, "%lu"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, long long), \
 	                      _TEST_FORMAT_##kind##_(test, "%ll"), \
 	__builtin_choose_expr(_TEST_ISTYPE_(type, unsigned long long), \
-	                      _TEST_FORMAT_##kind##_(test, "%ull"), \
+	                      _TEST_FORMAT_##kind##_(test, "%llu"), \
 	                      "<?>" \
 	                      ))))))))))))
 
@@ -301,7 +301,7 @@ void _test_print_suite_path(void);
 void _test_print_test_path(void);
 void _test_print_case_path(void);
 
-#define FATAL_FAILURE(code) test_exit(code)
+#define FATAL_FAILURE(code) _test_exit(code)
 #define NONFATAL_FAILURE(code) do { \
 	int *result = (currcase ? &currcase->exitcode : &currtest->exitcode); \
 	if (EXIT_SUCCESS == *result) \
@@ -356,8 +356,9 @@ struct _test_case_info {
 #endif
 };
 
-void test_exit(int exitcode) __attribute__((noreturn));
-int test_fork(int *exitcode) __attribute__((returns_twice));
+void _test_attach_debugger(void);
+void _test_exit(int exitcode) __attribute__((noreturn));
+int _test_fork(int *exitcode) __attribute__((returns_twice));
 
 #endif /* _C1_TEST_H */
 /* vim:set ft=c ts=4 sw=4 noet: */

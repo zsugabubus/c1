@@ -18,6 +18,8 @@
 #define _GNU_SOURCE
 #undef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#undef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE
 #ifndef TEST_NOLIBSEGFAULT
 # include <dlfcn.h>
 #endif
@@ -47,6 +49,14 @@ struct _test_suite_info *currsuite = NULL;
 struct _test_test_info *currtest = NULL;
 struct _test_case_info *currcase = NULL;
 
+static int ctty;
+
+#ifdef TEST_NOFORK
+static struct {
+	jmp_buf env;
+} currtest_env;
+#endif
+
 #define US_NS 1000ul
 #define MS_NS 1000000ul
 #define SEC_NS 1000000000ul
@@ -56,7 +66,7 @@ struct _test_case_info *currcase = NULL;
 #endif
 
 #ifndef TEST_NOFORK
-int test_fork(int *exitcode) {
+int _test_fork(int *exitcode) {
 	switch (fork()) {
 	case 0:
 		return 0;
@@ -73,17 +83,31 @@ int test_fork(int *exitcode) {
 }
 #endif
 
-#ifdef TEST_NOFORK
-static struct {
-	jmp_buf env;
-} currtest_env;
-#endif
+void _test_attach_debugger(void) {
+	pid_t pid;
 
-void test_exit(int exitcode) {
+	if (1 || -1 == ctty)
+		return;
+
+	sleep(1);
+	if ((pid = fork())) {
+		(void)waitpid(pid, NULL, 0);
+	} else {
+		char pid_str[20];
+
+		(void)sprintf(pid_str, "%u", (unsigned)getppid());
+		(void)dup2(ctty, STDIN_FILENO);
+		(void)dup2(ctty, STDOUT_FILENO);
+		(void)dup2(ctty, STDERR_FILENO);
+
+		(void)execlp("gdb", "gdb", "-q", "--pid", pid_str, "-ex", "up", "-ex", "up", "-ex", "list", NULL);
+		_exit(127);
+	}
+}
+
+void _test_exit(int exitcode) {
 	switch (exitcode) {
 	default:
-		/* FIXME: Dunno if it has something to do with GDB but it works only for the
-		 * first fork(). */
 		raise(SIGTRAP);
 		break;
 	case EXIT_SKIP:
@@ -197,11 +221,6 @@ void sighandler(int sig, siginfo_t *info, void *ucontext) {
 
 	(void)sig, (void)ucontext;
 
-#ifdef TEST_NOFORK
-	if (SIGTRAP == sig)
-		return;
-#endif
-
 	psiginfo(info, "\x1b[0;1;31mReceived unhandled signal\x1b[0m");
 
 	size = backtrace(array, 50);
@@ -209,23 +228,24 @@ void sighandler(int sig, siginfo_t *info, void *ucontext) {
 	fprintf(stderr, "\nBacktrace:\n");
 	backtrace_symbols_fd(array, size, STDERR_FILENO);
 
-	test_exit(EXIT_FAILURE);
+	_test_exit(EXIT_FAILURE);
 }
 
 static
 void sighandler_init(void) {
-	static struct sigaction sa;
+	struct sigaction sa;
+
 	sa.sa_sigaction = sighandler;
 	sa.sa_flags = SA_RESTART | SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 
 #define SIG(name) \
-	sigaction(SIG##name, &sa, NULL);
+	(void)sigaction(SIG##name, &sa, NULL);
 
 	SIG(ABRT  ) SIG(ALRM  ) SIG(BUS   ) SIG(FPE   ) SIG(HUP   )
 	SIG(ILL   ) SIG(INT   ) SIG(KILL  ) SIG(PIPE  ) SIG(POLL  )
 	SIG(PROF  ) SIG(QUIT  ) SIG(SEGV  ) SIG(STOP  ) SIG(TSTP  )
-	SIG(SYS   ) SIG(TERM  ) SIG(TRAP  ) SIG(TTIN  ) SIG(TTOU  )
+	SIG(SYS   ) SIG(TERM  ) /*  TRAP */ SIG(TTIN  ) SIG(TTOU  )
 	SIG(USR1  ) SIG(USR2  ) SIG(VTALRM) SIG(XCPU  ) SIG(XFSZ  )
 
 #undef SIG
@@ -287,6 +307,7 @@ int main(int argc, char **argv)
 	if (NULL == (libsegfault = dlopen("/lib/libSegFault.so", RTLD_LAZY)))
 		perror("dlopen");
 #endif
+	ctty = open("/dev/tty", O_RDWR | O_CLOEXEC);
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &ts_start);
 
@@ -467,7 +488,7 @@ int main(int argc, char **argv)
 			tssub(&ts_test_start, &ts_test_end, &ts_test_start);
 			_test_shared->total_ns = tstons(&ts_test_start);
 
-			test_exit(currtest->exitcode);
+			_test_exit(currtest->exitcode);
 		} else {
 #ifdef TEST_NOFORK
 			dup2(oldstderr, STDERR_FILENO);
@@ -573,10 +594,11 @@ int main(int argc, char **argv)
 		stat[test_failed],
 		stat[test_ignored]);
 
-	munmap(_test_shared, sizeof *_test_shared);
+	(void)munmap(_test_shared, sizeof *_test_shared);
 #ifndef TEST_NOLIBSEGFAULT
-	dlclose(libsegfault);
+	(void)dlclose(libsegfault);
 #endif
+	(void)close(ctty);
 
 	exit(0 == stat[test_failed] ? EXIT_SUCCESS : EXIT_FAILURE);
 }
