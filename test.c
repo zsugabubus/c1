@@ -195,7 +195,8 @@ cat(int fd)
 
 /* humanize time */
 static char *
-pretty_time(unsigned long ns) {
+pretty_time(unsigned long ns)
+{
 	static char buf[8];
 
 	char *unit;
@@ -224,9 +225,9 @@ tstons(struct timespec const *ts)
 /* *|result| = |end| - |start| */
 static void
 ts_sub(
-		struct timespec *result,
-		struct timespec const *end,
-		struct timespec const *start
+	struct timespec *result,
+	struct timespec const *end,
+	struct timespec const *start
 ) {
 	result->tv_sec  = end->tv_sec  - start->tv_sec  + (end->tv_nsec < start->tv_nsec);
 	result->tv_nsec = end->tv_nsec - start->tv_nsec + (end->tv_nsec < start->tv_nsec ? NS_PER_SEC : 0);
@@ -234,7 +235,8 @@ ts_sub(
 
 /* print an |n| characters width horizontal line of |ch| */
 static void
-hbar(size_t n, char c) {
+hbar(size_t n, char c)
+{
 	while (n-- > 0)
 		fputc(c, stdout);
 	fputc('\n', stdout);
